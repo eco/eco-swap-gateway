@@ -394,6 +394,130 @@ impl Context {
         )
     }
 
+    /// Build close_and_create_intent with a wrong reward_token (mismatched mint).
+    pub fn close_and_create_ix_wrong_reward_token(&self) -> Instruction {
+        let (swap_state, _) = self.swap_state_pda();
+        let dummy_vault = Pubkey::new_unique();
+        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
+        let wrong_token = Pubkey::new_unique();
+
+        let args = swap_intent::instructions::CreateIntentArgs {
+            destination: 1,
+            route_template: vec![0u8; 128],
+            tokens_amount_offset: 32,
+            calldata_amount_offset: 96,
+            reward_deadline: u64::MAX,
+            reward_creator: self.user.pubkey(),
+            reward_prover: Pubkey::new_unique(),
+            reward_token: wrong_token, // deliberately wrong
+            flat_fee: 0,
+            scalar_num: 1,
+            scalar_denom: 1,
+            allow_partial: false,
+            extra_calls: vec![],
+        };
+
+        let mut data = anchor_discriminator("close_and_create_intent");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        Instruction::new_with_bytes(
+            swap_intent::ID,
+            &data,
+            vec![
+                AccountMeta::new(self.user.pubkey(), true),
+                AccountMeta::new(swap_state, false),
+                AccountMeta::new_readonly(self.user_ata(), false),
+                AccountMeta::new_readonly(portal::ID, false),
+                AccountMeta::new(dummy_vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
+                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
+                AccountMeta::new_readonly(system_program::ID, false),
+                AccountMeta::new(self.user_ata(), false),
+                AccountMeta::new(vault_ata, false),
+                AccountMeta::new_readonly(self.mint, false),
+            ],
+        )
+    }
+
+    /// Build close_and_create_intent with a wrong output_token_account (different from open).
+    pub fn close_and_create_ix_wrong_token_account(&self, wrong_ata: Pubkey) -> Instruction {
+        let (swap_state, _) = self.swap_state_pda();
+        let dummy_vault = Pubkey::new_unique();
+        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
+
+        let args = swap_intent::instructions::CreateIntentArgs {
+            destination: 1,
+            route_template: vec![0u8; 128],
+            tokens_amount_offset: 32,
+            calldata_amount_offset: 96,
+            reward_deadline: u64::MAX,
+            reward_creator: self.user.pubkey(),
+            reward_prover: Pubkey::new_unique(),
+            reward_token: self.mint,
+            flat_fee: 0,
+            scalar_num: 1,
+            scalar_denom: 1,
+            allow_partial: false,
+            extra_calls: vec![],
+        };
+
+        let mut data = anchor_discriminator("close_and_create_intent");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        Instruction::new_with_bytes(
+            swap_intent::ID,
+            &data,
+            vec![
+                AccountMeta::new(self.user.pubkey(), true),
+                AccountMeta::new(swap_state, false),
+                AccountMeta::new_readonly(wrong_ata, false), // wrong token account
+                AccountMeta::new_readonly(portal::ID, false),
+                AccountMeta::new(dummy_vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
+                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
+                AccountMeta::new_readonly(system_program::ID, false),
+                AccountMeta::new(self.user_ata(), false),
+                AccountMeta::new(vault_ata, false),
+                AccountMeta::new_readonly(self.mint, false),
+            ],
+        )
+    }
+
+    /// Build a cancel instruction for a different user (attacker).
+    pub fn cancel_ix_wrong_user(&self, attacker: &Keypair) -> Instruction {
+        // Derive PDA from the real user (not the attacker) — attacker tries to close it
+        let (swap_state, _) = self.swap_state_pda();
+        let data = anchor_discriminator("cancel");
+
+        Instruction::new_with_bytes(
+            swap_intent::ID,
+            &data,
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(swap_state, false),
+            ],
+        )
+    }
+
+    /// Send a transaction signed by a specific keypair (not the default user).
+    pub fn send_as(&mut self, signer: &Keypair, ixs: &[Instruction]) -> TransactionResult {
+        let mut all_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(
+            COMPUTE_UNIT_LIMIT,
+        )];
+        all_ixs.extend_from_slice(ixs);
+
+        let tx = Transaction::new(
+            &[signer],
+            Message::new(&all_ixs, Some(&signer.pubkey())),
+            self.svm.latest_blockhash(),
+        );
+        let result = self.svm.send_transaction(tx);
+        self.svm.expire_blockhash();
+        result.map_err(Box::new)
+    }
+
     pub fn send(&mut self, ixs: &[Instruction]) -> TransactionResult {
         let mut all_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(
             COMPUTE_UNIT_LIMIT,

@@ -34,6 +34,8 @@ pub fn fund<'info>(
         .collect();
 
     let mut account_metas = vec![
+        // payer must be writable: Portal's fund_context uses it to pay for ATA creation via CPI,
+        // even though Portal's Fund struct does not mark payer as #[account(mut)].
         AccountMeta::new(payer.key(), true),
         AccountMeta::new(funder.key(), true),
         AccountMeta::new(vault.key(), false),

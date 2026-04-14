@@ -5,10 +5,10 @@ use eco_svm_std::Bytes32;
 use tiny_keccak::{Hasher, Keccak};
 
 use crate::constants::SKIP_CALLDATA_PATCH;
+use crate::cpi;
 use crate::events::IntentCreated;
 use crate::instructions::SwapIntentError;
 use crate::state::{SwapState, SWAP_STATE_SEED};
-use crate::{cpi as swap_cpi, cpi};
 
 /// An optional EVM call included in the route template for transparency.
 /// Already embedded in `route_template`; not used in on-chain computation.
@@ -57,7 +57,9 @@ pub struct CreateIntentArgs {
     /// Whether to allow partial vault funding.
     pub allow_partial: bool,
 
-    /// Optional extra calls embedded in the route template (for transparency only).
+    /// Optional extra calls embedded in the route template (for off-chain transparency only).
+    /// Not used in on-chain computation — deserialized and discarded. Each entry adds to
+    /// instruction data size and deserialization compute cost. Keep minimal.
     pub extra_calls: Vec<EvmCall>,
 }
 
@@ -205,7 +207,7 @@ pub fn close_and_create<'info>(
         route: route_template,
         reward: reward.clone(),
     };
-    swap_cpi::publish::publish(&ctx.accounts.portal_program, publish_args)?;
+    cpi::publish::publish(&ctx.accounts.portal_program, publish_args)?;
 
     // 12. CPI Portal::fund
     let fund_args = portal::instructions::FundArgs {
@@ -230,6 +232,8 @@ pub fn close_and_create<'info>(
     // 13. Emit event (swap_state close happens via Anchor constraint)
     emit!(IntentCreated::new(
         intent_hash,
+        ctx.accounts.user.key(),
+        reward_token,
         swap_output,
         route_amount,
         destination,

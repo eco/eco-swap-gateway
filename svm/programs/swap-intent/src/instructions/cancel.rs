@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 
+use crate::events::SwapCancelled;
 use crate::instructions::SwapIntentError;
 use crate::state::{SwapState, SWAP_STATE_SEED};
 
@@ -18,6 +19,7 @@ pub struct Cancel<'info> {
     pub swap_state: Account<'info, SwapState>,
 }
 
-pub fn cancel_swap(_ctx: Context<Cancel>) -> Result<()> {
+pub fn cancel_swap(ctx: Context<Cancel>) -> Result<()> {
+    emit!(SwapCancelled::new(ctx.accounts.user.key()));
     Ok(())
 }

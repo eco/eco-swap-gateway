@@ -1,9 +1,13 @@
 mod common;
 
+use anchor_spl::associated_token::get_associated_token_address;
+use anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account;
+use anchor_spl::token::spl_token;
 use common::Context;
 use solana_sdk::instruction::InstructionError;
+use solana_sdk::message::Message;
 use solana_sdk::signer::Signer;
-use solana_sdk::transaction::TransactionError;
+use solana_sdk::transaction::{Transaction, TransactionError};
 use swap_intent::instructions::SwapIntentError;
 
 /// Happy path: open -> mint tokens (simulates swap) -> close_and_create_intent.
@@ -245,4 +249,91 @@ fn fee_calculation_matches_expected() {
     // If the transaction succeeded, the fee calculation matched (otherwise vault PDA would mismatch)
     // Verify full swap_output was transferred as reward
     assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
+}
+
+/// Security regression: another user cannot cancel someone else's swap state.
+#[test]
+fn cancel_fails_with_wrong_user() {
+    let mut ctx = Context::new();
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+
+    let (swap_state_pda, _) = ctx.swap_state_pda();
+    assert!(ctx.account_exists(&swap_state_pda));
+
+    // Create attacker keypair and fund it
+    let attacker = solana_sdk::signature::Keypair::new();
+    ctx.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = ctx.cancel_ix_wrong_user(&attacker);
+    let err = ctx.send_as(&attacker, &[ix]).unwrap_err();
+
+    // PDA seeds don't match attacker's key, so Anchor rejects with ConstraintSeeds
+    assert!(
+        matches!(
+            err.err,
+            TransactionError::InstructionError(_, InstructionError::Custom(_))
+        ),
+        "Expected constraint failure for wrong user, got: {:?}",
+        err.err
+    );
+
+    // Verify state PDA is still intact
+    assert!(ctx.account_exists(&swap_state_pda));
+}
+
+/// Security regression: reward_token must match the swap output mint.
+#[test]
+fn close_fails_with_wrong_reward_token() {
+    let mut ctx = Context::new();
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(1_000_000);
+
+    let ix = ctx.close_and_create_ix_wrong_reward_token();
+    let err = ctx.send(&[ix]).unwrap_err();
+
+    assert!(
+        common::is_custom_error(&err, SwapIntentError::InvalidMint.into()),
+        "Expected InvalidMint, got: {:?}",
+        err.err
+    );
+}
+
+/// Security regression: output_token_account must match the one recorded at open time.
+#[test]
+fn close_fails_with_wrong_token_account() {
+    let mut ctx = Context::new();
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(1_000_000);
+
+    // Create a second ATA for the same mint (different account, same mint)
+    let other_holder = solana_sdk::signature::Keypair::new();
+    ctx.svm
+        .airdrop(&other_holder.pubkey(), 1_000_000_000)
+        .unwrap();
+    let other_ata = get_associated_token_address(&other_holder.pubkey(), &ctx.mint);
+    let create_ata_ix = create_associated_token_account(
+        &other_holder.pubkey(),
+        &other_holder.pubkey(),
+        &ctx.mint,
+        &spl_token::ID,
+    );
+    let tx = Transaction::new(
+        &[&other_holder],
+        Message::new(&[create_ata_ix], Some(&other_holder.pubkey())),
+        ctx.svm.latest_blockhash(),
+    );
+    ctx.svm.send_transaction(tx).unwrap();
+
+    // Try to close with the other holder's ATA instead of user's
+    let ix = ctx.close_and_create_ix_wrong_token_account(other_ata);
+    let err = ctx.send(&[ix]).unwrap_err();
+
+    assert!(
+        common::is_custom_error(&err, SwapIntentError::InvalidTokenAccount.into()),
+        "Expected InvalidTokenAccount, got: {:?}",
+        err.err
+    );
 }
