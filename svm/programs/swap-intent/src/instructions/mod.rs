@@ -12,7 +12,7 @@ pub use open::*;
 pub enum SwapIntentError {
     #[msg("Swap output is zero or insufficient")]
     InsufficientSwapOutput,
-    #[msg("Invalid scalar parameters")]
+    #[msg("Invalid scalar parameters (denom=0, num>denom, or num=0)")]
     InvalidScalar,
     #[msg("Route amount is zero after fee calculation")]
     RouteAmountZero,
@@ -26,4 +26,10 @@ pub enum SwapIntentError {
     OffsetOutOfBounds,
     #[msg("Arithmetic overflow in fee calculation")]
     ArithmeticOverflow,
+    #[msg("Portal program ID does not match expected program")]
+    InvalidPortalProgram,
+    #[msg("Token account does not match the one recorded at open time")]
+    InvalidTokenAccount,
+    #[msg("Remaining accounts length must be a multiple of 3 (from_ata, vault_ata, mint)")]
+    InvalidRemainingAccounts,
 }

@@ -42,13 +42,13 @@ pub struct CreateIntentArgs {
     /// Prover program that can prove fulfillment.
     pub reward_prover: Pubkey,
 
-    /// SPL mint of the reward token (matches the swap output token).
+    /// SPL mint of the reward token (must match the swap output token).
     pub reward_token: Pubkey,
 
     /// Fixed fee subtracted after scaling (in output token units, post-scalar).
     pub flat_fee: u64,
 
-    /// Scalar numerator for proportional fee (applied first).
+    /// Scalar numerator for proportional fee (applied first). Must be > 0.
     pub scalar_num: u64,
 
     /// Scalar denominator for proportional fee.
@@ -76,12 +76,16 @@ pub struct CloseAndCreateIntent<'info> {
     pub swap_state: Account<'info, SwapState>,
 
     #[account(
+        constraint = output_token_account.key() == swap_state.output_token_account @ SwapIntentError::InvalidTokenAccount,
         constraint = output_token_account.mint == swap_state.output_mint @ SwapIntentError::InvalidMint,
     )]
     pub output_token_account: InterfaceAccount<'info, TokenAccount>,
 
-    /// CHECK: validated as executable; program ID verified by CPI success.
-    #[account(executable)]
+    /// CHECK: validated against portal::ID.
+    #[account(
+        executable,
+        address = portal::ID @ SwapIntentError::InvalidPortalProgram,
+    )]
     pub portal_program: UncheckedAccount<'info>,
 
     /// CHECK: validated against vault_pda derivation in handler logic.
@@ -92,7 +96,7 @@ pub struct CloseAndCreateIntent<'info> {
     pub token_2022_program: Program<'info, token_2022::Token2022>,
     pub associated_token_program: Program<'info, associated_token::AssociatedToken>,
     pub system_program: Program<'info, System>,
-    // remaining_accounts: [from_ata, vault_ata, mint] for Portal::fund
+    // remaining_accounts: [from_ata, vault_ata, mint] per reward token for Portal::fund
 }
 
 pub fn close_and_create<'info>(
@@ -117,27 +121,42 @@ pub fn close_and_create<'info>(
 
     // 1. Validate scalar parameters
     require!(scalar_denom > 0, SwapIntentError::InvalidScalar);
+    require!(scalar_num > 0, SwapIntentError::InvalidScalar);
     require!(scalar_num <= scalar_denom, SwapIntentError::InvalidScalar);
 
-    // 2. Calculate swap output (balance delta)
+    // 2. Validate reward_token matches the swap output mint
+    require!(
+        reward_token == ctx.accounts.swap_state.output_mint,
+        SwapIntentError::InvalidMint
+    );
+
+    // 3. Validate remaining_accounts length (must be multiple of 3: from_ata, vault_ata, mint)
+    require!(
+        ctx.remaining_accounts.len() % 3 == 0,
+        SwapIntentError::InvalidRemainingAccounts
+    );
+
+    // 4. Calculate swap output (balance delta)
     let post_balance = ctx.accounts.output_token_account.amount;
     let swap_output = post_balance
         .checked_sub(ctx.accounts.swap_state.pre_balance)
         .ok_or(SwapIntentError::ArithmeticOverflow)?;
     require!(swap_output > 0, SwapIntentError::InsufficientSwapOutput);
 
-    // 3. Calculate route_amount = swap_output * scalar_num / scalar_denom - flat_fee
-    let scaled = swap_output
-        .checked_mul(scalar_num)
-        .ok_or(SwapIntentError::ArithmeticOverflow)?
-        .checked_div(scalar_denom)
+    // 5. Calculate route_amount = swap_output * scalar_num / scalar_denom - flat_fee
+    //    Uses u128 intermediate to avoid overflow on large swap_output * scalar_num.
+    //    Integer division truncates toward zero (floor), which is standard for on-chain fee math.
+    let scaled = (swap_output as u128)
+        .checked_mul(scalar_num as u128)
+        .and_then(|v| v.checked_div(scalar_denom as u128))
+        .and_then(|v| u64::try_from(v).ok())
         .ok_or(SwapIntentError::ArithmeticOverflow)?;
     let route_amount = scaled
         .checked_sub(flat_fee)
         .ok_or(SwapIntentError::ArithmeticOverflow)?;
     require!(route_amount > 0, SwapIntentError::RouteAmountZero);
 
-    // 4. Patch route_template at tokens_amount_offset (always)
+    // 6. Patch route_template at tokens_amount_offset (always)
     let amount_bytes = to_be_uint256(route_amount);
     patch_route_template(
         &mut route_template,
@@ -145,7 +164,7 @@ pub fn close_and_create<'info>(
         &amount_bytes,
     )?;
 
-    // 5. Patch route_template at calldata_amount_offset (skip if sentinel)
+    // 7. Patch route_template at calldata_amount_offset (skip if sentinel u32::MAX)
     if calldata_amount_offset != SKIP_CALLDATA_PATCH {
         patch_route_template(
             &mut route_template,
@@ -154,10 +173,12 @@ pub fn close_and_create<'info>(
         )?;
     }
 
-    // 6. Compute route_hash = keccak256(patched_route)
+    // 8. Compute route_hash = keccak256(patched_route)
     let route_hash = keccak256(&route_template);
 
-    // 7. Build Reward and compute hashes
+    // 9. Build Reward and compute hashes.
+    //    reward.tokens[0].amount = swap_output (full swap output locked in vault as solver reward).
+    //    The solver fronts route_amount on the destination chain and claims swap_output as profit.
     let reward = portal::types::Reward {
         deadline: reward_deadline,
         creator: reward_creator,
@@ -171,14 +192,14 @@ pub fn close_and_create<'info>(
     let reward_hash = reward.hash();
     let intent_hash = portal::types::intent_hash(destination, &route_hash, &reward_hash);
 
-    // 8. Validate vault PDA
+    // 10. Validate vault PDA
     let (expected_vault, _) = portal::state::vault_pda(&intent_hash);
     require!(
         ctx.accounts.vault.key() == expected_vault,
         SwapIntentError::InvalidVault
     );
 
-    // 9. CPI Portal::publish
+    // 11. CPI Portal::publish
     let publish_args = portal::instructions::PublishArgs {
         destination,
         route: route_template,
@@ -186,7 +207,7 @@ pub fn close_and_create<'info>(
     };
     swap_cpi::publish::publish(&ctx.accounts.portal_program, publish_args)?;
 
-    // 10. CPI Portal::fund
+    // 12. CPI Portal::fund
     let fund_args = portal::instructions::FundArgs {
         destination,
         route_hash,
@@ -206,7 +227,7 @@ pub fn close_and_create<'info>(
         fund_args,
     )?;
 
-    // 11. Emit event (swap_state close happens via Anchor constraint)
+    // 13. Emit event (swap_state close happens via Anchor constraint)
     emit!(IntentCreated::new(
         intent_hash,
         swap_output,

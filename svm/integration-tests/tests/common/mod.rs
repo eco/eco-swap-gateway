@@ -19,8 +19,7 @@ use tiny_keccak::{Hasher, Keccak};
 
 const COMPUTE_UNIT_LIMIT: u32 = 400_000;
 const PORTAL_BIN: &[u8] = include_bytes!("../../../../../eco-routes-svm/target/deploy/portal.so");
-const SWAP_INTENT_BIN: &[u8] =
-    include_bytes!("../../../target/deploy/swap_intent.so");
+const SWAP_INTENT_BIN: &[u8] = include_bytes!("../../../target/deploy/swap_intent.so");
 
 type TransactionResult = Result<TransactionMetadata, Box<FailedTransactionMetadata>>;
 
@@ -432,10 +431,7 @@ fn keccak256(data: &[u8]) -> Bytes32 {
     hash.into()
 }
 
-pub fn is_custom_error(
-    result: &Box<FailedTransactionMetadata>,
-    expected_code: u32,
-) -> bool {
+pub fn is_custom_error(result: &Box<FailedTransactionMetadata>, expected_code: u32) -> bool {
     matches!(
         result.err,
         TransactionError::InstructionError(_, InstructionError::Custom(code)) if code == expected_code

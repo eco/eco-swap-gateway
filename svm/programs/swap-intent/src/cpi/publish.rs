@@ -17,5 +17,7 @@ pub fn publish(portal_program: &AccountInfo, args: PublishArgs) -> Result<()> {
 
     let ix = Instruction::new_with_bytes(portal_program.key(), &ix_data, vec![]);
 
+    // Solana runtime requires the CPI target program in account_infos even
+    // though Portal's Publish context has zero accounts.
     invoke(&ix, &[portal_program.to_account_info()]).map_err(Into::into)
 }

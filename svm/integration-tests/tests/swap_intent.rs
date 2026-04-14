@@ -1,7 +1,9 @@
 mod common;
 
 use common::Context;
+use solana_sdk::instruction::InstructionError;
 use solana_sdk::signer::Signer;
+use solana_sdk::transaction::TransactionError;
 use swap_intent::instructions::SwapIntentError;
 
 /// Happy path: open -> mint tokens (simulates swap) -> close_and_create_intent.
@@ -33,7 +35,13 @@ fn open_swap_close_and_create_intent_success() {
     assert_eq!(ctx.token_balance(&ctx.user_ata()), post_balance);
 
     // Step 3: close_and_create_intent
-    let ix = ctx.close_and_create_ix(pre_balance, post_balance, flat_fee, scalar_num, scalar_denom);
+    let ix = ctx.close_and_create_ix(
+        pre_balance,
+        post_balance,
+        flat_fee,
+        scalar_num,
+        scalar_denom,
+    );
     ctx.send(&[ix]).unwrap();
 
     // Verify state PDA is closed
@@ -137,6 +145,24 @@ fn close_fails_with_scalar_num_greater_than_denom() {
     );
 }
 
+/// Error: invalid scalar (numerator = 0).
+#[test]
+fn close_fails_with_zero_scalar_num() {
+    let mut ctx = Context::new();
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(1_000_000);
+
+    let ix = ctx.close_and_create_ix_error_case(0, 0, 1); // scalar_num = 0
+    let err = ctx.send(&[ix]).unwrap_err();
+
+    assert!(
+        common::is_custom_error(&err, SwapIntentError::InvalidScalar.into()),
+        "Expected InvalidScalar, got: {:?}",
+        err.err
+    );
+}
+
 /// Error: route_amount is zero because flat_fee eats everything after scaling.
 #[test]
 fn close_fails_with_route_amount_zero() {
@@ -184,10 +210,15 @@ fn open_twice_fails() {
 
     // Second open should fail -- PDA already initialized
     let err = ctx.send(&[ctx.open_ix()]).unwrap_err();
-    // Anchor/system program returns an error for already-initialized PDA
+
+    // System program returns Custom(0) for already-initialized account
     assert!(
-        err.err != solana_sdk::transaction::TransactionError::AccountInUse,
-        "Expected PDA init failure"
+        matches!(
+            err.err,
+            TransactionError::InstructionError(_, InstructionError::Custom(_))
+        ),
+        "Expected PDA init failure (Custom error), got: {:?}",
+        err.err
     );
 }
 

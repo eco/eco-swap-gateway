@@ -10,6 +10,7 @@ pub fn swap_state_pda(user: &Pubkey) -> (Pubkey, u8) {
 #[derive(InitSpace)]
 pub struct SwapState {
     pub user: Pubkey,
+    pub output_token_account: Pubkey,
     pub output_mint: Pubkey,
     pub pre_balance: u64,
     pub bump: u8,
