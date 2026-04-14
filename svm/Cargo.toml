@@ -1,0 +1,22 @@
+[workspace]
+members = ["programs/*"]
+resolver = "2"
+
+[workspace.dependencies]
+anchor-lang = "0.31.1"
+anchor-spl = "0.31.1"
+derive-new = "0.7.0"
+eco-svm-std = { path = "../../eco-routes-svm/packages/eco-svm-std" }
+goldie = "0.5.0"
+portal = { path = "../../eco-routes-svm/programs/portal", features = ["no-entrypoint"] }
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1

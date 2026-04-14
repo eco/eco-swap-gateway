@@ -1,0 +1,317 @@
+use anchor_lang::prelude::*;
+use anchor_spl::token_interface::TokenAccount;
+use anchor_spl::{associated_token, token, token_2022};
+use eco_svm_std::Bytes32;
+use tiny_keccak::{Hasher, Keccak};
+
+use crate::constants::SKIP_CALLDATA_PATCH;
+use crate::events::IntentCreated;
+use crate::instructions::SwapIntentError;
+use crate::state::{SwapState, SWAP_STATE_SEED};
+use crate::{cpi as swap_cpi, cpi};
+
+/// An optional EVM call included in the route template for transparency.
+/// Already embedded in `route_template`; not used in on-chain computation.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct EvmCall {
+    pub target: [u8; 32],
+    pub data: Vec<u8>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct CreateIntentArgs {
+    /// Destination chain ID.
+    pub destination: u64,
+
+    /// ABI-encoded route template with placeholder amounts.
+    pub route_template: Vec<u8>,
+
+    /// Byte offset of `tokens[0].amount` in `route_template` (always patched).
+    pub tokens_amount_offset: u32,
+
+    /// Byte offset of transfer amount in `calls[0].data`.
+    /// Set to `u32::MAX` to skip patching (Case 3: DEX swap routes).
+    pub calldata_amount_offset: u32,
+
+    /// Reward deadline on the source chain.
+    pub reward_deadline: u64,
+
+    /// Creator of the intent (receives refund if intent expires).
+    pub reward_creator: Pubkey,
+
+    /// Prover program that can prove fulfillment.
+    pub reward_prover: Pubkey,
+
+    /// SPL mint of the reward token (matches the swap output token).
+    pub reward_token: Pubkey,
+
+    /// Fixed fee subtracted after scaling (in output token units, post-scalar).
+    pub flat_fee: u64,
+
+    /// Scalar numerator for proportional fee (applied first).
+    pub scalar_num: u64,
+
+    /// Scalar denominator for proportional fee.
+    pub scalar_denom: u64,
+
+    /// Whether to allow partial vault funding.
+    pub allow_partial: bool,
+
+    /// Optional extra calls embedded in the route template (for transparency only).
+    pub extra_calls: Vec<EvmCall>,
+}
+
+#[derive(Accounts)]
+pub struct CloseAndCreateIntent<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(
+        mut,
+        close = user,
+        seeds = [SWAP_STATE_SEED, user.key().as_ref()],
+        bump = swap_state.bump,
+        constraint = swap_state.user == user.key() @ SwapIntentError::InvalidUser,
+    )]
+    pub swap_state: Account<'info, SwapState>,
+
+    #[account(
+        constraint = output_token_account.mint == swap_state.output_mint @ SwapIntentError::InvalidMint,
+    )]
+    pub output_token_account: InterfaceAccount<'info, TokenAccount>,
+
+    /// CHECK: validated as executable; program ID verified by CPI success.
+    #[account(executable)]
+    pub portal_program: UncheckedAccount<'info>,
+
+    /// CHECK: validated against vault_pda derivation in handler logic.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, token::Token>,
+    pub token_2022_program: Program<'info, token_2022::Token2022>,
+    pub associated_token_program: Program<'info, associated_token::AssociatedToken>,
+    pub system_program: Program<'info, System>,
+    // remaining_accounts: [from_ata, vault_ata, mint] for Portal::fund
+}
+
+pub fn close_and_create<'info>(
+    ctx: Context<'_, '_, '_, 'info, CloseAndCreateIntent<'info>>,
+    args: CreateIntentArgs,
+) -> Result<()> {
+    let CreateIntentArgs {
+        destination,
+        mut route_template,
+        tokens_amount_offset,
+        calldata_amount_offset,
+        reward_deadline,
+        reward_creator,
+        reward_prover,
+        reward_token,
+        flat_fee,
+        scalar_num,
+        scalar_denom,
+        allow_partial,
+        extra_calls: _, // Already embedded in route_template
+    } = args;
+
+    // 1. Validate scalar parameters
+    require!(scalar_denom > 0, SwapIntentError::InvalidScalar);
+    require!(scalar_num <= scalar_denom, SwapIntentError::InvalidScalar);
+
+    // 2. Calculate swap output (balance delta)
+    let post_balance = ctx.accounts.output_token_account.amount;
+    let swap_output = post_balance
+        .checked_sub(ctx.accounts.swap_state.pre_balance)
+        .ok_or(SwapIntentError::ArithmeticOverflow)?;
+    require!(swap_output > 0, SwapIntentError::InsufficientSwapOutput);
+
+    // 3. Calculate route_amount = swap_output * scalar_num / scalar_denom - flat_fee
+    let scaled = swap_output
+        .checked_mul(scalar_num)
+        .ok_or(SwapIntentError::ArithmeticOverflow)?
+        .checked_div(scalar_denom)
+        .ok_or(SwapIntentError::ArithmeticOverflow)?;
+    let route_amount = scaled
+        .checked_sub(flat_fee)
+        .ok_or(SwapIntentError::ArithmeticOverflow)?;
+    require!(route_amount > 0, SwapIntentError::RouteAmountZero);
+
+    // 4. Patch route_template at tokens_amount_offset (always)
+    let amount_bytes = to_be_uint256(route_amount);
+    patch_route_template(
+        &mut route_template,
+        tokens_amount_offset as usize,
+        &amount_bytes,
+    )?;
+
+    // 5. Patch route_template at calldata_amount_offset (skip if sentinel)
+    if calldata_amount_offset != SKIP_CALLDATA_PATCH {
+        patch_route_template(
+            &mut route_template,
+            calldata_amount_offset as usize,
+            &amount_bytes,
+        )?;
+    }
+
+    // 6. Compute route_hash = keccak256(patched_route)
+    let route_hash = keccak256(&route_template);
+
+    // 7. Build Reward and compute hashes
+    let reward = portal::types::Reward {
+        deadline: reward_deadline,
+        creator: reward_creator,
+        prover: reward_prover,
+        native_amount: 0,
+        tokens: vec![portal::types::TokenAmount {
+            token: reward_token,
+            amount: swap_output,
+        }],
+    };
+    let reward_hash = reward.hash();
+    let intent_hash = portal::types::intent_hash(destination, &route_hash, &reward_hash);
+
+    // 8. Validate vault PDA
+    let (expected_vault, _) = portal::state::vault_pda(&intent_hash);
+    require!(
+        ctx.accounts.vault.key() == expected_vault,
+        SwapIntentError::InvalidVault
+    );
+
+    // 9. CPI Portal::publish
+    let publish_args = portal::instructions::PublishArgs {
+        destination,
+        route: route_template,
+        reward: reward.clone(),
+    };
+    swap_cpi::publish::publish(&ctx.accounts.portal_program, publish_args)?;
+
+    // 10. CPI Portal::fund
+    let fund_args = portal::instructions::FundArgs {
+        destination,
+        route_hash,
+        reward,
+        allow_partial,
+    };
+    cpi::fund::fund(
+        &ctx.accounts.portal_program,
+        &ctx.accounts.user.to_account_info(),
+        &ctx.accounts.user.to_account_info(),
+        &ctx.accounts.vault,
+        &ctx.accounts.token_program.to_account_info(),
+        &ctx.accounts.token_2022_program.to_account_info(),
+        &ctx.accounts.associated_token_program.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        ctx.remaining_accounts,
+        fund_args,
+    )?;
+
+    // 11. Emit event (swap_state close happens via Anchor constraint)
+    emit!(IntentCreated::new(
+        intent_hash,
+        swap_output,
+        route_amount,
+        destination,
+    ));
+
+    Ok(())
+}
+
+/// Convert a u64 to a big-endian uint256 (32 bytes, zero-left-padded).
+fn to_be_uint256(value: u64) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[24..32].copy_from_slice(&value.to_be_bytes());
+    bytes
+}
+
+/// Patch 32 bytes of a route template at the given offset.
+fn patch_route_template(route: &mut [u8], offset: usize, value: &[u8; 32]) -> Result<()> {
+    let end = offset
+        .checked_add(32)
+        .filter(|&end| end <= route.len())
+        .ok_or(SwapIntentError::OffsetOutOfBounds)?;
+    route[offset..end].copy_from_slice(value);
+    Ok(())
+}
+
+fn keccak256(data: &[u8]) -> Bytes32 {
+    let mut hasher = Keccak::v256();
+    let mut hash = [0u8; 32];
+    hasher.update(data);
+    hasher.finalize(&mut hash);
+    hash.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_be_uint256_zero() {
+        let result = to_be_uint256(0);
+        assert_eq!(result, [0u8; 32]);
+    }
+
+    #[test]
+    fn to_be_uint256_one() {
+        let mut expected = [0u8; 32];
+        expected[31] = 1;
+        assert_eq!(to_be_uint256(1), expected);
+    }
+
+    #[test]
+    fn to_be_uint256_max() {
+        let result = to_be_uint256(u64::MAX);
+        assert_eq!(&result[..24], &[0u8; 24]);
+        assert_eq!(&result[24..], &u64::MAX.to_be_bytes());
+    }
+
+    #[test]
+    fn patch_route_template_valid() {
+        let mut route = vec![0u8; 64];
+        let value = [0xABu8; 32];
+        patch_route_template(&mut route, 16, &value).unwrap();
+        assert_eq!(&route[16..48], &[0xAB; 32]);
+        assert_eq!(&route[0..16], &[0; 16]);
+        assert_eq!(&route[48..64], &[0; 16]);
+    }
+
+    #[test]
+    fn patch_route_template_at_end() {
+        let mut route = vec![0u8; 32];
+        let value = [0xFFu8; 32];
+        patch_route_template(&mut route, 0, &value).unwrap();
+        assert_eq!(&route, &[0xFF; 32]);
+    }
+
+    #[test]
+    fn patch_route_template_out_of_bounds() {
+        let mut route = vec![0u8; 31];
+        let value = [0u8; 32];
+        let result = patch_route_template(&mut route, 0, &value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn patch_route_template_offset_overflow() {
+        let mut route = vec![0u8; 64];
+        let value = [0u8; 32];
+        let result = patch_route_template(&mut route, usize::MAX, &value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn keccak256_deterministic() {
+        let data = b"hello world";
+        let hash1 = keccak256(data);
+        let hash2 = keccak256(data);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn keccak256_different_inputs() {
+        let hash1 = keccak256(b"hello");
+        let hash2 = keccak256(b"world");
+        assert_ne!(hash1, hash2);
+    }
+}

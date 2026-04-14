@@ -1,0 +1,26 @@
+[toolchain]
+anchor_version = "0.31.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+swap_intent = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
+
+[programs.devnet]
+swap_intent = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
+
+[programs.mainnet]
+swap_intent = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+build = "anchor build"
+test = "cargo test --no-fail-fast"
