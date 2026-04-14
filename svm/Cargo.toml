@@ -1,5 +1,5 @@
 [workspace]
-members = ["programs/*"]
+members = ["integration-tests", "programs/*"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -9,6 +9,7 @@ derive-new = "0.7.0"
 eco-svm-std = { path = "../../eco-routes-svm/packages/eco-svm-std" }
 goldie = "0.5.0"
 portal = { path = "../../eco-routes-svm/programs/portal", features = ["no-entrypoint"] }
+swap-intent = { path = "programs/swap-intent" }
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 
 [profile.release]

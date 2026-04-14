@@ -1,0 +1,14 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+eco-svm-std = { workspace = true }
+litesvm = "0.6.1"
+portal = { workspace = true }
+solana-sdk = "2.2.1"
+swap-intent = { workspace = true, features = ["no-entrypoint"] }
+tiny-keccak = { workspace = true }
