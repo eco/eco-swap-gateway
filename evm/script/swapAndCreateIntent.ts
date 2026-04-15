@@ -32,6 +32,10 @@ import { swapIntentAbi } from "./abi/swapIntent.js";
 import { uniswapV3RouterAbi } from "./abi/uniswapV3Router.js";
 import { EVMRouteAbiItem } from "./abi/portal.js";
 
+// ─── Configuration ─────────────────────────────────────────────────────────
+
+const PEPE_AMOUNT = 200_000n;
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 // BSC addresses
@@ -189,13 +193,13 @@ async function main() {
   });
 
   // --- Parameters ---
-  const inputAmount = parseUnits("1000000", 18); // 1M PEPE (18 decimals)
+  const inputAmount = parseUnits(PEPE_AMOUNT.toString(), 18);
   const minOutputAmount = 0n; // Let the contract handle slippage via fee model
   const rewardDeadline = BigInt(Math.floor(Date.now() / 1000) + 7200); // 2 hours
 
   console.log(`Account:        ${account.address}`);
   console.log(`SwapIntent:     ${swapIntentAddress}`);
-  console.log(`Input:          1,000,000 PEPE`);
+  console.log(`Input:          ${PEPE_AMOUNT.toLocaleString()} PEPE`);
   console.log(`Swap:           PEPE → USDC on BSC (Uniswap V3)`);
   console.log(`Intent:         USDC on BSC → USDC on Base`);
   console.log();
