@@ -17,7 +17,6 @@ import {
   http,
   encodeFunctionData,
   encodeAbiParameters,
-  parseAbiParameters,
   erc20Abi,
   type Hex,
   type Address,
@@ -76,12 +75,8 @@ function buildRouteTemplate(recipient: Address): {
   }).toLowerCase();
 
   const routeDeadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
-  const salt = keccak256(
-    encodeAbiParameters(parseAbiParameters(["uint256, uint256"]), [
-      0n,
-      BigInt(Date.now()),
-    ]),
-  );
+  const salt =
+    `0x${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}` as Hex;
 
   // ERC20 transfer calldata: transfer(recipient, MARKER)
   const transferCalldata = encodeFunctionData({
