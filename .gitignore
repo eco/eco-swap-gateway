@@ -20,6 +20,10 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Foundry
+evm/out/
+evm/cache/
+
 # Environment
 .env
 .env.*

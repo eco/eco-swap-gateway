@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {Call, Reward} from "eco-routes/contracts/types/Intent.sol";
+
+/// @notice Parameters for creating an intent from a swap output.
+struct IntentParams {
+    uint64 destination;
+    bytes routeTemplate;
+    uint32 tokensAmountOffset;
+    uint32 calldataAmountOffset;
+    uint64 rewardDeadline;
+    address rewardCreator;
+    address rewardProver;
+    uint256 flatFee;
+    uint256 scalarNum;
+    uint256 scalarDenom;
+    bool allowPartial;
+}
+
+interface ISwapIntent {
+    // --- Events ---
+
+    event IntentCreated(
+        bytes32 indexed intentHash,
+        address indexed user,
+        address rewardToken,
+        uint256 swapOutput,
+        uint256 routeAmount,
+        uint64 destination
+    );
+
+    // --- Errors ---
+
+    error InsufficientSwapOutput();
+    error InvalidScalar();
+    error RouteAmountZero();
+    error OffsetOutOfBounds();
+    error CallFailed(uint256 index);
+    error InvalidCallTarget(address target);
+
+    // --- Core ---
+
+    /// @notice Executes swap calls, measures the output delta, and creates + funds
+    ///         an intent via Portal.publishAndFund.
+    /// @param inputToken  ERC20 token to pull from the caller.
+    /// @param inputAmount Amount of inputToken to pull.
+    /// @param outputToken ERC20 token expected from the swap (reward token).
+    /// @param calls       Arbitrary calls for swap execution (approve, swap, etc.).
+    /// @param intent      Intent creation parameters.
+    /// @return intentHash Hash of the created intent.
+    function swapAndCreateIntent(
+        address inputToken,
+        uint256 inputAmount,
+        address outputToken,
+        Call[] calldata calls,
+        IntentParams calldata intent
+    ) external returns (bytes32 intentHash);
+}
