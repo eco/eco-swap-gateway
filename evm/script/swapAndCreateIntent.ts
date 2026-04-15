@@ -11,6 +11,7 @@
  *   PRIVATE_KEY=0x... SWAP_INTENT_ADDRESS=0x... npx tsx evm/script/swapAndCreateIntent.ts
  */
 
+import crypto from "node:crypto";
 import {
   createWalletClient,
   createPublicClient,
@@ -75,8 +76,7 @@ function buildRouteTemplate(recipient: Address): {
   }).toLowerCase();
 
   const routeDeadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
-  const salt =
-    `0x${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}` as Hex;
+  const salt = `0x${crypto.randomBytes(32).toString("hex")}` as Hex;
 
   // ERC20 transfer calldata: transfer(recipient, MARKER)
   const transferCalldata = encodeFunctionData({
@@ -257,8 +257,12 @@ async function main() {
   console.log(`  status: ${receipt.status}`);
 
   // 5. Parse IntentCreated event
-  const logs = parseEventLogs({ abi: swapIntentAbi, logs: receipt.logs });
-  const intentEvent = logs.find((log) => log.eventName === "IntentCreated");
+  const [intentEvent] = parseEventLogs({
+    abi: swapIntentAbi,
+    eventName: "IntentCreated",
+    strict: true,
+    logs: receipt.logs,
+  });
 
   if (intentEvent) {
     const { intentHash, swapOutput, routeAmount, destination } =
