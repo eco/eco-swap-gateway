@@ -11,6 +11,7 @@
  *   PRIVATE_KEY=0x... SWAP_INTENT_ADDRESS=0x... npx tsx evm/script/swapAndCreateIntent.ts
  */
 
+import "dotenv/config";
 import crypto from "node:crypto";
 import {
   createWalletClient,
@@ -169,7 +170,7 @@ function buildSwapCalls(
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
-  const privateKey = process.env.PRIVATE_KEY;
+  const privateKey = process.env.USER_PRIVATE_KEY;
   if (!privateKey) {
     throw new Error("PRIVATE_KEY env var is required");
   }
@@ -250,6 +251,8 @@ async function main() {
         flatFee: FLAT_FEE,
         scalarNum: SCALAR_NUM,
         scalarDenom: SCALAR_DENOM,
+        sourceDecimals: 18, // USDC on BSC
+        destinationDecimals: 6, // USDC on Base
         allowPartial: false,
       },
     ],

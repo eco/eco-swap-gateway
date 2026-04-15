@@ -27,3 +27,7 @@ evm/cache/
 # Environment
 .env
 .env.*
+
+evm/broadcast/
+
+evm/script/verification-keys.json

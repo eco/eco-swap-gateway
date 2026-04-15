@@ -29,6 +29,8 @@ export const swapIntentAbi = [
           { name: "flatFee", type: "uint256" },
           { name: "scalarNum", type: "uint256" },
           { name: "scalarDenom", type: "uint256" },
+          { name: "sourceDecimals", type: "uint8" },
+          { name: "destinationDecimals", type: "uint8" },
           { name: "allowPartial", type: "bool" },
         ],
       },
