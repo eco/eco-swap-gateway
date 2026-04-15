@@ -57,6 +57,8 @@ contract ReentrantDEX {
             flatFee: 0,
             scalarNum: 1,
             scalarDenom: 1,
+            sourceDecimals: 18,
+            destinationDecimals: 18,
             allowPartial: false
         });
         target.swapAndCreateIntent(address(inputToken), 0, address(outputToken), calls, intent);

@@ -66,10 +66,17 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         uint256 swapOutput = postBalance - preBalance;
         if (swapOutput == 0) revert InsufficientSwapOutput();
 
-        // 6. Calculate route amount: swapOutput * scalarNum / scalarDenom - flatFee.
+        // 6. Calculate route amount in source decimals, then convert to destination decimals.
         uint256 scaled = (swapOutput * intent.scalarNum) / intent.scalarDenom;
         if (scaled <= intent.flatFee) revert RouteAmountZero();
         uint256 routeAmount = scaled - intent.flatFee;
+
+        if (intent.sourceDecimals > intent.destinationDecimals) {
+            routeAmount = routeAmount / (10 ** (intent.sourceDecimals - intent.destinationDecimals));
+        } else if (intent.destinationDecimals > intent.sourceDecimals) {
+            routeAmount = routeAmount * (10 ** (intent.destinationDecimals - intent.sourceDecimals));
+        }
+        if (routeAmount == 0) revert RouteAmountZero();
 
         // 7. Patch route template.
         bytes memory route = _patchRoute(

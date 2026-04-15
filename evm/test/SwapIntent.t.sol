@@ -74,6 +74,8 @@ contract SwapIntentTest is Test {
             flatFee: 5_000,
             scalarNum: 997,
             scalarDenom: 1000,
+            sourceDecimals: 18,
+            destinationDecimals: 18,
             allowPartial: false
         });
     }
@@ -589,6 +591,101 @@ contract SwapIntentTest is Test {
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.OffsetOutOfBounds.selector);
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent
+        );
+        vm.stopPrank();
+    }
+
+    // ─── Decimal conversion ─────────────────────────────────────────
+
+    function test_decimalConversion_sourceGreaterThanDest() public {
+        // 18 → 6 decimals (e.g., USDC BSC → USDC Base)
+        // swapOutput = 1_000_000 (in 18-dec units), no fees
+        // routeAmount should be 1_000_000 / 10^12 = 0.000001 in 6-dec = 1 (truncated to 0!)
+        // Use a larger amount: 1e18 worth of swap output
+        // swapOutput = 1_000_000, routeAmount = 1_000_000 / 1e12 = 0 → too small
+        // Need a swap output large enough: 1e12 min for 1 unit in 6-dec
+        uint256 amount = 2_000_000_000_000; // 2e12
+        inputToken.mint(user, amount);
+        outputToken.mint(address(dex), amount);
+
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+        intent.sourceDecimals = 18;
+        intent.destinationDecimals = 6;
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), amount);
+
+        // routeAmount = 2e12 / 1e12 = 2 (in 6-decimal units)
+        vm.expectEmit(false, true, false, true);
+        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), amount, 2, 1);
+
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent
+        );
+        vm.stopPrank();
+    }
+
+    function test_decimalConversion_destGreaterThanSource() public {
+        // 6 → 18 decimals
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+        intent.sourceDecimals = 6;
+        intent.destinationDecimals = 18;
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+
+        // routeAmount = 1_000_000 * 1e12 = 1e18
+        vm.expectEmit(false, true, false, true);
+        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, 1_000_000_000_000_000_000, 1);
+
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent
+        );
+        vm.stopPrank();
+    }
+
+    function test_decimalConversion_sameDecimals() public {
+        // 18 → 18: no conversion, routeAmount == netAmount
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+        intent.sourceDecimals = 18;
+        intent.destinationDecimals = 18;
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+
+        vm.expectEmit(false, true, false, true);
+        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, SWAP_AMOUNT, 1);
+
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_decimalConversion_truncatesToZero() public {
+        // 18 → 6 with tiny swapOutput: routeAmount truncates to 0
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+        intent.sourceDecimals = 18;
+        intent.destinationDecimals = 6;
+        // SWAP_AMOUNT = 1_000_000, divided by 1e12 = 0 → RouteAmountZero
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.RouteAmountZero.selector);
         swapIntent.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent
         );

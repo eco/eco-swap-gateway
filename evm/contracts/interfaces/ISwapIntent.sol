@@ -15,6 +15,8 @@ struct IntentParams {
     uint256 flatFee;
     uint256 scalarNum;
     uint256 scalarDenom;
+    uint8 sourceDecimals;
+    uint8 destinationDecimals;
     bool allowPartial;
 }
 
