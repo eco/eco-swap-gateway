@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Call, Reward} from "eco-routes/contracts/types/Intent.sol";
+import {Call} from "eco-routes/contracts/types/Intent.sol";
 
 /// @notice Parameters for creating an intent from a swap output.
 struct IntentParams {
@@ -35,7 +35,6 @@ interface ISwapIntent {
     error InsufficientSwapOutput();
     error InvalidScalar();
     error RouteAmountZero();
-    error FlatFeeExceedsOutput();
     error OffsetOutOfBounds();
     error CallFailed(uint256 index, bytes reason);
     error InvalidCallTarget(address target);

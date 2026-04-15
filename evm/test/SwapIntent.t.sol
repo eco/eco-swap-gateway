@@ -546,7 +546,7 @@ contract SwapIntentTest is Test {
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
-        vm.expectRevert(ISwapIntent.FlatFeeExceedsOutput.selector);
+        vm.expectRevert(ISwapIntent.RouteAmountZero.selector);
         swapIntent.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent
         );
@@ -559,7 +559,7 @@ contract SwapIntentTest is Test {
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
-        vm.expectRevert(ISwapIntent.FlatFeeExceedsOutput.selector);
+        vm.expectRevert(ISwapIntent.RouteAmountZero.selector);
         swapIntent.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent
         );
