@@ -61,6 +61,6 @@ contract ReentrantDEX {
             destinationDecimals: 18,
             allowPartial: false
         });
-        target.swapAndCreateIntent(address(inputToken), 0, address(outputToken), calls, intent);
+        target.swapAndCreateIntent(address(inputToken), 0, address(outputToken), calls, intent, address(this));
     }
 }

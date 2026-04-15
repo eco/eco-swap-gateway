@@ -36,7 +36,8 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         uint256 inputAmount,
         address outputToken,
         Call[] calldata calls,
-        IntentParams calldata intent
+        IntentParams calldata intent,
+        address sweepRecipient
     ) external nonReentrant returns (bytes32 intentHash) {
         // 1. Validate scalar parameters.
         if (intent.scalarDenom == 0 || intent.scalarNum == 0 || intent.scalarNum > intent.scalarDenom) {
@@ -103,8 +104,8 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
 
         // 11. Cleanup: reset approval, sweep residual tokens.
         IERC20(outputToken).forceApprove(address(portal), 0);
-        _sweepToken(inputToken, msg.sender);
-        _sweepToken(outputToken, msg.sender);
+        _sweepToken(inputToken, sweepRecipient);
+        _sweepToken(outputToken, sweepRecipient);
     }
 
     // --- Internal helpers ---

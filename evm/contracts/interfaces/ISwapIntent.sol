@@ -49,17 +49,19 @@ interface ISwapIntent {
     /// @dev Does not support fee-on-transfer tokens as outputToken. The reward amount
     ///      is set to the raw balance delta, which would be incorrect for deflationary
     ///      tokens since a second transfer fee applies when funding the Portal vault.
-    /// @param inputToken  ERC20 token to pull from the caller.
-    /// @param inputAmount Amount of inputToken to pull.
-    /// @param outputToken ERC20 token expected from the swap (reward token).
-    /// @param calls       Arbitrary calls for swap execution (approve, swap, etc.).
-    /// @param intent      Intent creation parameters.
+    /// @param inputToken      ERC20 token to pull from the caller.
+    /// @param inputAmount     Amount of inputToken to pull.
+    /// @param outputToken     ERC20 token expected from the swap (reward token).
+    /// @param calls           Arbitrary calls for swap execution (approve, swap, etc.).
+    /// @param intent          Intent creation parameters.
+    /// @param sweepRecipient  Address to receive residual tokens after the swap.
     /// @return intentHash Hash of the created intent.
     function swapAndCreateIntent(
         address inputToken,
         uint256 inputAmount,
         address outputToken,
         Call[] calldata calls,
-        IntentParams calldata intent
+        IntentParams calldata intent,
+        address sweepRecipient
     ) external returns (bytes32 intentHash);
 }
