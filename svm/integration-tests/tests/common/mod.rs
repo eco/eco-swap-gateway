@@ -187,9 +187,12 @@ impl Context {
         flat_fee: u64,
         scalar_num: u64,
         scalar_denom: u64,
+        source_decimals: u8,
+        destination_decimals: u8,
     ) -> Instruction {
         let swap_output = post_balance - pre_balance;
-        let route_amount = swap_output * scalar_num / scalar_denom - flat_fee;
+        let net_amount = swap_output * scalar_num / scalar_denom - flat_fee;
+        let route_amount = convert_decimals(net_amount as u128, source_decimals, destination_decimals);
         let destination: u64 = 1; // Ethereum mainnet
 
         // Build route template: 128 bytes with known offsets for patching
@@ -235,6 +238,8 @@ impl Context {
             flat_fee,
             scalar_num,
             scalar_denom,
+            source_decimals,
+            destination_decimals,
             allow_partial: false,
             extra_calls: vec![],
         };
@@ -271,9 +276,12 @@ impl Context {
         flat_fee: u64,
         scalar_num: u64,
         scalar_denom: u64,
+        source_decimals: u8,
+        destination_decimals: u8,
     ) -> Instruction {
         let swap_output = post_balance - pre_balance;
-        let route_amount = swap_output * scalar_num / scalar_denom - flat_fee;
+        let net_amount = swap_output * scalar_num / scalar_denom - flat_fee;
+        let route_amount = convert_decimals(net_amount as u128, source_decimals, destination_decimals);
         let destination: u64 = 1;
 
         // Route template: only offset 32 is patched, bytes 96..128 are left as-is
@@ -316,6 +324,8 @@ impl Context {
             flat_fee,
             scalar_num,
             scalar_denom,
+            source_decimals,
+            destination_decimals,
             allow_partial: false,
             extra_calls: vec![],
         };
@@ -350,6 +360,8 @@ impl Context {
         flat_fee: u64,
         scalar_num: u64,
         scalar_denom: u64,
+        source_decimals: u8,
+        destination_decimals: u8,
     ) -> Instruction {
         let (swap_state, _) = self.swap_state_pda();
         let dummy_vault = Pubkey::new_unique();
@@ -367,6 +379,8 @@ impl Context {
             flat_fee,
             scalar_num,
             scalar_denom,
+            source_decimals,
+            destination_decimals,
             allow_partial: false,
             extra_calls: vec![],
         };
@@ -413,6 +427,8 @@ impl Context {
             flat_fee: 0,
             scalar_num: 1,
             scalar_denom: 1,
+            source_decimals: 6,
+            destination_decimals: 6,
             allow_partial: false,
             extra_calls: vec![],
         };
@@ -458,6 +474,8 @@ impl Context {
             flat_fee: 0,
             scalar_num: 1,
             scalar_denom: 1,
+            source_decimals: 6,
+            destination_decimals: 6,
             allow_partial: false,
             extra_calls: vec![],
         };
@@ -541,10 +559,20 @@ fn anchor_discriminator(name: &str) -> Vec<u8> {
     hash.to_bytes()[..8].to_vec()
 }
 
-fn to_be_uint256(value: u64) -> [u8; 32] {
+fn to_be_uint256(value: u128) -> [u8; 32] {
     let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&value.to_be_bytes());
+    bytes[16..32].copy_from_slice(&value.to_be_bytes());
     bytes
+}
+
+fn convert_decimals(amount: u128, source_decimals: u8, destination_decimals: u8) -> u128 {
+    if source_decimals > destination_decimals {
+        amount / 10u128.pow((source_decimals - destination_decimals) as u32)
+    } else if destination_decimals > source_decimals {
+        amount * 10u128.pow((destination_decimals - source_decimals) as u32)
+    } else {
+        amount
+    }
 }
 
 fn keccak256(data: &[u8]) -> Bytes32 {

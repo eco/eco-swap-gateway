@@ -54,6 +54,12 @@ pub struct CreateIntentArgs {
     /// Scalar denominator for proportional fee.
     pub scalar_denom: u64,
 
+    /// Decimals of the source (swap output) token on this chain.
+    pub source_decimals: u8,
+
+    /// Decimals of the destination token on the target chain.
+    pub destination_decimals: u8,
+
     /// Whether to allow partial vault funding.
     pub allow_partial: bool,
 
@@ -117,6 +123,8 @@ pub fn close_and_create<'info>(
         flat_fee,
         scalar_num,
         scalar_denom,
+        source_decimals,
+        destination_decimals,
         allow_partial,
         extra_calls: _, // Already embedded in route_template
     } = args;
@@ -145,7 +153,7 @@ pub fn close_and_create<'info>(
         .ok_or(SwapIntentError::ArithmeticOverflow)?;
     require!(swap_output > 0, SwapIntentError::InsufficientSwapOutput);
 
-    // 5. Calculate route_amount = swap_output * scalar_num / scalar_denom - flat_fee
+    // 5. Calculate fee-adjusted amount in source decimals, then convert to destination decimals.
     //    Uses u128 intermediate to avoid overflow on large swap_output * scalar_num.
     //    Integer division truncates toward zero (floor), which is standard for on-chain fee math.
     let scaled = (swap_output as u128)
@@ -153,12 +161,32 @@ pub fn close_and_create<'info>(
         .and_then(|v| v.checked_div(scalar_denom as u128))
         .and_then(|v| u64::try_from(v).ok())
         .ok_or(SwapIntentError::ArithmeticOverflow)?;
-    let route_amount = scaled
+    let net_amount = scaled
         .checked_sub(flat_fee)
         .ok_or(SwapIntentError::ArithmeticOverflow)?;
+    require!(net_amount > 0, SwapIntentError::RouteAmountZero);
+
+    // 6. Convert from source decimals to destination decimals.
+    //    Scaling UP (dest > source) can overflow u64, so route_amount is u128.
+    //    Scaling DOWN (source > dest) truncates via integer division (may produce 0).
+    let route_amount: u128 = if source_decimals > destination_decimals {
+        let divisor = 10u128
+            .checked_pow((source_decimals - destination_decimals) as u32)
+            .ok_or(SwapIntentError::ArithmeticOverflow)?;
+        (net_amount as u128) / divisor
+    } else if destination_decimals > source_decimals {
+        let multiplier = 10u128
+            .checked_pow((destination_decimals - source_decimals) as u32)
+            .ok_or(SwapIntentError::ArithmeticOverflow)?;
+        (net_amount as u128)
+            .checked_mul(multiplier)
+            .ok_or(SwapIntentError::ArithmeticOverflow)?
+    } else {
+        net_amount as u128
+    };
     require!(route_amount > 0, SwapIntentError::RouteAmountZero);
 
-    // 6. Patch route_template at tokens_amount_offset (always)
+    // 7. Patch route_template at tokens_amount_offset (always)
     let amount_bytes = to_be_uint256(route_amount);
     patch_route_template(
         &mut route_template,
@@ -166,7 +194,7 @@ pub fn close_and_create<'info>(
         &amount_bytes,
     )?;
 
-    // 7. Patch route_template at calldata_amount_offset (skip if sentinel u32::MAX)
+    // 8. Patch route_template at calldata_amount_offset (skip if sentinel u32::MAX)
     if calldata_amount_offset != SKIP_CALLDATA_PATCH {
         patch_route_template(
             &mut route_template,
@@ -175,10 +203,10 @@ pub fn close_and_create<'info>(
         )?;
     }
 
-    // 8. Compute route_hash = keccak256(patched_route)
+    // 9. Compute route_hash = keccak256(patched_route)
     let route_hash = keccak256(&route_template);
 
-    // 9. Build Reward and compute hashes.
+    // 10. Build Reward and compute hashes.
     //    reward.tokens[0].amount = swap_output (full swap output locked in vault as solver reward).
     //    The solver fronts route_amount on the destination chain and claims swap_output as profit.
     let reward = portal::types::Reward {
@@ -194,14 +222,14 @@ pub fn close_and_create<'info>(
     let reward_hash = reward.hash();
     let intent_hash = portal::types::intent_hash(destination, &route_hash, &reward_hash);
 
-    // 10. Validate vault PDA
+    // 11. Validate vault PDA
     let (expected_vault, _) = portal::state::vault_pda(&intent_hash);
     require!(
         ctx.accounts.vault.key() == expected_vault,
         SwapIntentError::InvalidVault
     );
 
-    // 11. CPI Portal::publish
+    // 12. CPI Portal::publish
     let publish_args = portal::instructions::PublishArgs {
         destination,
         route: route_template,
@@ -209,7 +237,7 @@ pub fn close_and_create<'info>(
     };
     cpi::publish::publish(&ctx.accounts.portal_program, publish_args)?;
 
-    // 12. CPI Portal::fund
+    // 13. CPI Portal::fund
     let fund_args = portal::instructions::FundArgs {
         destination,
         route_hash,
@@ -229,7 +257,7 @@ pub fn close_and_create<'info>(
         fund_args,
     )?;
 
-    // 13. Emit event (swap_state close happens via Anchor constraint)
+    // 14. Emit event (swap_state close happens via Anchor constraint)
     emit!(IntentCreated::new(
         intent_hash,
         ctx.accounts.user.key(),
@@ -242,10 +270,10 @@ pub fn close_and_create<'info>(
     Ok(())
 }
 
-/// Convert a u64 to a big-endian uint256 (32 bytes, zero-left-padded).
-fn to_be_uint256(value: u64) -> [u8; 32] {
+/// Convert a u128 to a big-endian uint256 (32 bytes, zero-left-padded).
+fn to_be_uint256(value: u128) -> [u8; 32] {
     let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&value.to_be_bytes());
+    bytes[16..32].copy_from_slice(&value.to_be_bytes());
     bytes
 }
 
@@ -285,10 +313,25 @@ mod tests {
     }
 
     #[test]
-    fn to_be_uint256_max() {
-        let result = to_be_uint256(u64::MAX);
-        assert_eq!(&result[..24], &[0u8; 24]);
-        assert_eq!(&result[24..], &u64::MAX.to_be_bytes());
+    fn to_be_uint256_u64_max() {
+        let result = to_be_uint256(u64::MAX as u128);
+        assert_eq!(&result[..16], &[0u8; 16]);
+        assert_eq!(&result[16..], &(u64::MAX as u128).to_be_bytes());
+    }
+
+    #[test]
+    fn to_be_uint256_u128_max() {
+        let result = to_be_uint256(u128::MAX);
+        assert_eq!(&result[16..], &u128::MAX.to_be_bytes());
+    }
+
+    #[test]
+    fn to_be_uint256_large_decimal_conversion() {
+        // Simulates 6→18 decimal conversion: 18_400 USDC (6 dec) * 10^12
+        let value: u128 = 18_400_000_000 * 1_000_000_000_000;
+        let result = to_be_uint256(value);
+        assert_eq!(&result[..16], &[0u8; 16]);
+        assert_eq!(&result[16..], &value.to_be_bytes());
     }
 
     #[test]

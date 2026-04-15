@@ -9,7 +9,7 @@ pub struct IntentCreated {
     pub user: Pubkey,
     pub reward_token: Pubkey,
     pub swap_output: u64,
-    pub route_amount: u64,
+    pub route_amount: u128,
     pub destination: u64,
 }
 

@@ -45,6 +45,8 @@ fn open_swap_close_and_create_intent_success() {
         flat_fee,
         scalar_num,
         scalar_denom,
+        6,
+        6,
     );
     ctx.send(&[ix]).unwrap();
 
@@ -70,7 +72,7 @@ fn close_and_create_intent_skip_calldata_patch() {
     ctx.mint_to_user(swap_amount);
 
     let ix =
-        ctx.close_and_create_ix_skip_calldata(0, swap_amount, flat_fee, scalar_num, scalar_denom);
+        ctx.close_and_create_ix_skip_calldata(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6);
     ctx.send(&[ix]).unwrap();
 
     // Verify state PDA is closed and tokens transferred
@@ -103,7 +105,7 @@ fn close_fails_with_zero_swap_output() {
     ctx.send(&[ctx.open_ix()]).unwrap();
 
     // Don't mint any tokens -- swap output will be 0
-    let ix = ctx.close_and_create_ix_error_case(0, 1, 1);
+    let ix = ctx.close_and_create_ix_error_case(0, 1, 1, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -121,7 +123,7 @@ fn close_fails_with_zero_scalar_denom() {
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
-    let ix = ctx.close_and_create_ix_error_case(0, 1, 0); // scalar_denom = 0
+    let ix = ctx.close_and_create_ix_error_case(0, 1, 0, 6, 6); // scalar_denom = 0
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -139,7 +141,7 @@ fn close_fails_with_scalar_num_greater_than_denom() {
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
-    let ix = ctx.close_and_create_ix_error_case(0, 1001, 1000); // num > denom
+    let ix = ctx.close_and_create_ix_error_case(0, 1001, 1000, 6, 6); // num > denom
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -157,7 +159,7 @@ fn close_fails_with_zero_scalar_num() {
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
-    let ix = ctx.close_and_create_ix_error_case(0, 0, 1); // scalar_num = 0
+    let ix = ctx.close_and_create_ix_error_case(0, 0, 1, 6, 6); // scalar_num = 0
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -176,7 +178,7 @@ fn close_fails_with_route_amount_zero() {
     ctx.mint_to_user(100); // tiny swap output
 
     // scalar = 1/1, flat_fee = 100 -> route_amount = 100 * 1/1 - 100 = 0
-    let ix = ctx.close_and_create_ix_error_case(100, 1, 1);
+    let ix = ctx.close_and_create_ix_error_case(100, 1, 1, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -195,7 +197,7 @@ fn close_fails_when_flat_fee_exceeds_scaled_amount() {
     ctx.mint_to_user(1_000);
 
     // scaled = 1000 * 1/1 = 1000, flat_fee = 2000 -> underflow
-    let ix = ctx.close_and_create_ix_error_case(2_000, 1, 1);
+    let ix = ctx.close_and_create_ix_error_case(2_000, 1, 1, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -243,7 +245,7 @@ fn fee_calculation_matches_expected() {
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
-    let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom);
+    let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6);
     ctx.send(&[ix]).unwrap();
 
     // If the transaction succeeded, the fee calculation matched (otherwise vault PDA would mismatch)
@@ -334,6 +336,89 @@ fn close_fails_with_wrong_token_account() {
     assert!(
         common::is_custom_error(&err, SwapIntentError::InvalidTokenAccount.into()),
         "Expected InvalidTokenAccount, got: {:?}",
+        err.err
+    );
+}
+
+// ─── Decimal Conversion Tests ───────────────────────────────────────────────
+
+/// Same decimals (6→6): route_amount is unchanged by decimal conversion.
+#[test]
+fn decimal_conversion_same_decimals() {
+    let mut ctx = Context::new();
+
+    let swap_amount = 1_000_000;
+    let flat_fee = 5_000;
+    let scalar_num = 997;
+    let scalar_denom = 1000;
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(swap_amount);
+
+    let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6);
+    ctx.send(&[ix]).unwrap();
+
+    let (swap_state_pda, _) = ctx.swap_state_pda();
+    assert!(!ctx.account_exists(&swap_state_pda));
+    assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
+}
+
+/// Scale UP (6→18): route_amount = net_amount * 10^12. This exceeds u64 max for
+/// large amounts, proving the u128 promotion works correctly.
+#[test]
+fn decimal_conversion_6_to_18() {
+    let mut ctx = Context::new();
+
+    // 18,400 USDC at 6 decimals. After 10^12 scaling: 1.84e22 — overflows u64.
+    let swap_amount = 18_400_000_000u64;
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(swap_amount);
+
+    // No fees, scalar 1:1, source=6, dest=18
+    let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 6, 18);
+    ctx.send(&[ix]).unwrap();
+
+    let (swap_state_pda, _) = ctx.swap_state_pda();
+    assert!(!ctx.account_exists(&swap_state_pda));
+    assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
+}
+
+/// Scale DOWN (18→6): route_amount = net_amount / 10^12.
+#[test]
+fn decimal_conversion_18_to_6() {
+    let mut ctx = Context::new();
+
+    // 2 USDC at 18 decimals = 2_000_000_000_000. After /10^12 = 2 at 6 decimals.
+    let swap_amount = 2_000_000_000_000u64;
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(swap_amount);
+
+    // No fees, scalar 1:1, source=18, dest=6
+    let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 18, 6);
+    ctx.send(&[ix]).unwrap();
+
+    let (swap_state_pda, _) = ctx.swap_state_pda();
+    assert!(!ctx.account_exists(&swap_state_pda));
+    assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
+}
+
+/// Truncation to zero: scaling down produces route_amount = 0 → RouteAmountZero.
+/// swap_output = 1_000_000, source=18, dest=6 → 1_000_000 / 10^12 = 0.
+#[test]
+fn decimal_conversion_truncates_to_zero() {
+    let mut ctx = Context::new();
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(1_000_000);
+
+    let ix = ctx.close_and_create_ix_error_case(0, 1, 1, 18, 6);
+    let err = ctx.send(&[ix]).unwrap_err();
+
+    assert!(
+        common::is_custom_error(&err, SwapIntentError::RouteAmountZero.into()),
+        "Expected RouteAmountZero, got: {:?}",
         err.err
     );
 }
