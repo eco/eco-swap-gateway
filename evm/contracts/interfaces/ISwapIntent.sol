@@ -35,14 +35,19 @@ interface ISwapIntent {
     error InsufficientSwapOutput();
     error InvalidScalar();
     error RouteAmountZero();
+    error FlatFeeExceedsOutput();
     error OffsetOutOfBounds();
-    error CallFailed(uint256 index);
+    error CallFailed(uint256 index, bytes reason);
     error InvalidCallTarget(address target);
+    error InvalidPortal();
 
     // --- Core ---
 
     /// @notice Executes swap calls, measures the output delta, and creates + funds
     ///         an intent via Portal.publishAndFund.
+    /// @dev Does not support fee-on-transfer tokens as outputToken. The reward amount
+    ///      is set to the raw balance delta, which would be incorrect for deflationary
+    ///      tokens since a second transfer fee applies when funding the Portal vault.
     /// @param inputToken  ERC20 token to pull from the caller.
     /// @param inputAmount Amount of inputToken to pull.
     /// @param outputToken ERC20 token expected from the swap (reward token).

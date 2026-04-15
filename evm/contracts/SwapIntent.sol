@@ -13,6 +13,7 @@ import {ISwapIntent, IntentParams} from "./interfaces/ISwapIntent.sol";
 /// @title SwapIntent
 /// @notice Atomically swaps tokens via arbitrary DEX calls and creates a Portal
 ///         intent whose reward amount equals the actual swap output.
+/// @dev Does not support fee-on-transfer tokens as outputToken.
 contract SwapIntent is ISwapIntent, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -23,6 +24,9 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
     IIntentSource public immutable portal;
 
     constructor(address _portal) {
+        if (_portal == address(0) || _portal.code.length == 0) {
+            revert InvalidPortal();
+        }
         portal = IIntentSource(_portal);
     }
 
@@ -47,13 +51,14 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         // 3. Snapshot output token balance before swap.
         uint256 preBalance = IERC20(outputToken).balanceOf(address(this));
 
-        // 4. Execute swap calls.
+        // 4. Execute swap calls. Block calls to this contract and the portal.
         for (uint256 i; i < calls.length; ++i) {
-            if (calls[i].target == address(this)) {
+            if (calls[i].target == address(this) || calls[i].target == address(portal)) {
                 revert InvalidCallTarget(calls[i].target);
             }
-            (bool success,) = calls[i].target.call{value: calls[i].value}(calls[i].data);
-            if (!success) revert CallFailed(i);
+            (bool success, bytes memory returnData) =
+                calls[i].target.call{value: calls[i].value}(calls[i].data);
+            if (!success) revert CallFailed(i, returnData);
         }
 
         // 5. Measure swap output.
@@ -62,7 +67,9 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         if (swapOutput == 0) revert InsufficientSwapOutput();
 
         // 6. Calculate route amount: swapOutput * scalarNum / scalarDenom - flatFee.
-        uint256 routeAmount = (swapOutput * intent.scalarNum) / intent.scalarDenom - intent.flatFee;
+        uint256 scaled = (swapOutput * intent.scalarNum) / intent.scalarDenom;
+        if (intent.flatFee >= scaled) revert FlatFeeExceedsOutput();
+        uint256 routeAmount = scaled - intent.flatFee;
         if (routeAmount == 0) revert RouteAmountZero();
 
         // 7. Patch route template.
@@ -88,7 +95,7 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         // 10. Emit event.
         emit IntentCreated(intentHash, msg.sender, outputToken, swapOutput, routeAmount, intent.destination);
 
-        // 11. Cleanup: sweep residual tokens, reset approval.
+        // 11. Cleanup: reset approval, sweep residual tokens.
         IERC20(outputToken).forceApprove(address(portal), 0);
         _sweepToken(inputToken, msg.sender);
         _sweepToken(outputToken, msg.sender);
