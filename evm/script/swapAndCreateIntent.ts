@@ -30,6 +30,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 import { swapIntentAbi } from "./abi/swapIntent.js";
 import { uniswapV3RouterAbi } from "./abi/uniswapV3Router.js";
+import { EVMRouteAbiItem } from "./abi/portal.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -52,17 +53,11 @@ const FLAT_FEE = 0n;
 // ─── Route Template Builder ─────────────────────────────────────────────────
 
 /**
- * ABI type for the Route struct (matches eco-routes contracts/types/Intent.sol).
- * Used to encode the route template that describes what happens on the
- * destination chain.
- */
-const routeAbiType = parseAbiParameters([
-  "(bytes32 salt, uint64 deadline, address portal, uint256 nativeAmount, (address token, uint256 amount)[] tokens, (address target, bytes data, uint256 value)[] calls)",
-]);
-
-/**
  * Build an ABI-encoded route template and compute the byte offsets where
  * the on-chain contract must patch the actual `routeAmount`.
+ *
+ * Uses the Route struct ABI extracted from the Portal contract (EVMRouteAbiItem)
+ * so the encoding stays in sync with the on-chain type.
  *
  * The route describes an ERC20 transfer on Base: send USDC to the recipient.
  * The amount is set to a unique MARKER so we can locate it in the encoded bytes.
@@ -104,7 +99,7 @@ function buildRouteTemplate(recipient: Address): {
     calls: [{ target: USDC_BASE, data: transferCalldata, value: 0n }],
   };
 
-  const encoded = encodeAbiParameters(routeAbiType, [route]);
+  const encoded = encodeAbiParameters([EVMRouteAbiItem], [route]);
 
   // Strip 0x prefix and search for the marker (as lowercase hex).
   const hex = encoded.slice(2).toLowerCase();
