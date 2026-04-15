@@ -18,11 +18,11 @@ import {
   encodeFunctionData,
   encodeAbiParameters,
   erc20Abi,
+  parseEventLogs,
   type Hex,
   type Address,
   padHex,
   parseUnits,
-  keccak256,
 } from "viem";
 import { bsc } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
@@ -257,21 +257,18 @@ async function main() {
   console.log(`  status: ${receipt.status}`);
 
   // 5. Parse IntentCreated event
-  const intentCreatedTopic = keccak256(
-    new TextEncoder().encode(
-      "IntentCreated(bytes32,address,address,uint256,uint256,uint64)",
-    ) as unknown as Hex,
-  );
+  const logs = parseEventLogs({ abi: swapIntentAbi, logs: receipt.logs });
+  const intentEvent = logs.find((log) => log.eventName === "IntentCreated");
 
-  const intentLog = receipt.logs.find(
-    (log) => log.topics[0] === intentCreatedTopic,
-  );
-
-  if (intentLog) {
-    const intentHash = intentLog.topics[1];
+  if (intentEvent) {
+    const { intentHash, swapOutput, routeAmount, destination } =
+      intentEvent.args;
     console.log();
-    console.log(`Intent created!`);
-    console.log(`  intentHash: ${intentHash}`);
+    console.log("Intent created!");
+    console.log(`  intentHash:  ${intentHash}`);
+    console.log(`  swapOutput:  ${swapOutput}`);
+    console.log(`  routeAmount: ${routeAmount}`);
+    console.log(`  destination: ${destination}`);
   }
 }
 
