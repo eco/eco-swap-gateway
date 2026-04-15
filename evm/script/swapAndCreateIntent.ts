@@ -49,10 +49,10 @@ const USDC_BASE: Address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PORTAL_BASE: Address = "0x399Dbd5DF04f83103F77A58cBa2B7c4d3cdede97";
 const BASE_CHAIN_ID = 8453n;
 
-// Fee parameters (0.3% scalar fee, no flat fee)
-const SCALAR_NUM = 997n;
-const SCALAR_DENOM = 1000n;
-const FLAT_FEE = 0n;
+// Fee parameters: 6 bps scalar fee, $0.01 flat fee
+const SCALAR_NUM = 9994n; // 10000 - 6 = 9994
+const SCALAR_DENOM = 10000n;
+const FLAT_FEE = parseUnits("0.01", 18); // USDC on BSC is 18 decimals
 
 // ─── Route Template Builder ─────────────────────────────────────────────────
 
