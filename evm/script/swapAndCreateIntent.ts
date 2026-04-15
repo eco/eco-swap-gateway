@@ -18,6 +18,7 @@ import {
   encodeFunctionData,
   encodeAbiParameters,
   parseAbiParameters,
+  erc20Abi,
   type Hex,
   type Address,
   padHex,
@@ -26,6 +27,9 @@ import {
 } from "viem";
 import { bsc } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
+
+import { swapIntentAbi } from "./abi/swapIntent.js";
+import { uniswapV3RouterAbi } from "./abi/uniswapV3Router.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -44,108 +48,6 @@ const BASE_CHAIN_ID = 8453n;
 const SCALAR_NUM = 997n;
 const SCALAR_DENOM = 1000n;
 const FLAT_FEE = 0n;
-
-// ─── ABIs ───────────────────────────────────────────────────────────────────
-
-const erc20Abi = [
-  {
-    name: "approve",
-    type: "function",
-    inputs: [
-      { name: "spender", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [{ type: "bool" }],
-    stateMutability: "nonpayable",
-  },
-  {
-    name: "transfer",
-    type: "function",
-    inputs: [
-      { name: "to", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [{ type: "bool" }],
-    stateMutability: "nonpayable",
-  },
-] as const;
-
-// Uniswap V3 SwapRouter02
-const swapRouterAbi = [
-  {
-    name: "exactInputSingle",
-    type: "function",
-    inputs: [
-      {
-        name: "params",
-        type: "tuple",
-        components: [
-          { name: "tokenIn", type: "address" },
-          { name: "tokenOut", type: "address" },
-          { name: "fee", type: "uint24" },
-          { name: "recipient", type: "address" },
-          { name: "amountIn", type: "uint256" },
-          { name: "amountOutMinimum", type: "uint256" },
-          { name: "sqrtPriceLimitX96", type: "uint160" },
-        ],
-      },
-    ],
-    outputs: [{ name: "amountOut", type: "uint256" }],
-    stateMutability: "payable",
-  },
-] as const;
-
-const swapIntentAbi = [
-  {
-    name: "swapAndCreateIntent",
-    type: "function",
-    inputs: [
-      { name: "inputToken", type: "address" },
-      { name: "inputAmount", type: "uint256" },
-      { name: "outputToken", type: "address" },
-      {
-        name: "calls",
-        type: "tuple[]",
-        components: [
-          { name: "target", type: "address" },
-          { name: "data", type: "bytes" },
-          { name: "value", type: "uint256" },
-        ],
-      },
-      {
-        name: "intent",
-        type: "tuple",
-        components: [
-          { name: "destination", type: "uint64" },
-          { name: "routeTemplate", type: "bytes" },
-          { name: "tokensAmountOffset", type: "uint32" },
-          { name: "calldataAmountOffset", type: "uint32" },
-          { name: "rewardDeadline", type: "uint64" },
-          { name: "rewardCreator", type: "address" },
-          { name: "rewardProver", type: "address" },
-          { name: "flatFee", type: "uint256" },
-          { name: "scalarNum", type: "uint256" },
-          { name: "scalarDenom", type: "uint256" },
-          { name: "allowPartial", type: "bool" },
-        ],
-      },
-    ],
-    outputs: [{ name: "intentHash", type: "bytes32" }],
-    stateMutability: "nonpayable",
-  },
-  {
-    name: "IntentCreated",
-    type: "event",
-    inputs: [
-      { name: "intentHash", type: "bytes32", indexed: true },
-      { name: "user", type: "address", indexed: true },
-      { name: "rewardToken", type: "address", indexed: false },
-      { name: "swapOutput", type: "uint256", indexed: false },
-      { name: "routeAmount", type: "uint256", indexed: false },
-      { name: "destination", type: "uint64", indexed: false },
-    ],
-  },
-] as const;
 
 // ─── Route Template Builder ─────────────────────────────────────────────────
 
@@ -248,7 +150,7 @@ function buildSwapCalls(
   });
 
   const swapData = encodeFunctionData({
-    abi: swapRouterAbi,
+    abi: uniswapV3RouterAbi,
     functionName: "exactInputSingle",
     args: [
       {
