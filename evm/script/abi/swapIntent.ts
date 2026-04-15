@@ -34,6 +34,7 @@ export const swapIntentAbi = [
           { name: "allowPartial", type: "bool" },
         ],
       },
+      { name: "sweepRecipient", type: "address" },
     ],
     outputs: [{ name: "intentHash", type: "bytes32" }],
     stateMutability: "nonpayable",

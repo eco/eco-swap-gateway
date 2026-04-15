@@ -255,6 +255,7 @@ async function main() {
         destinationDecimals: 6, // USDC on Base
         allowPartial: false,
       },
+      account.address, // sweepRecipient
     ],
   });
 
