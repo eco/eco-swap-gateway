@@ -27,3 +27,6 @@ evm/cache/
 # Environment
 .env
 .env.*
+!.env.example
+
+evm/broadcast/

@@ -11,3 +11,4 @@ via_ir = true
 evm_version = "paris"
 cbor_metadata = false
 bytecode_hash = "none"
+fs_permissions = [{ access = "read-write", path = "out/" }]

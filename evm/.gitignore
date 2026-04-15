@@ -1,0 +1,10 @@
+# Foundry
+out/
+cache/
+
+# Environment
+.env
+script/verification-keys.json
+
+# Node
+node_modules/
