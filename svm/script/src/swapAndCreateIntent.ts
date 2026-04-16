@@ -274,6 +274,7 @@ function encodeCreateIntentArgs(args: {
   rewardCreator: PublicKey;
   rewardProver: PublicKey;
   rewardToken: PublicKey;
+  rewardAmount: bigint;
   flatFee: bigint;
   scalarNum: bigint;
   scalarDenom: bigint;
@@ -303,6 +304,8 @@ function encodeCreateIntentArgs(args: {
     args.rewardCreator.toBuffer(),
     args.rewardProver.toBuffer(),
     args.rewardToken.toBuffer(),
+    // reward_amount: u64 (0 = use full swap_output)
+    writeU64LE(args.rewardAmount),
     // fee params
     writeU64LE(args.flatFee),
     writeU64LE(args.scalarNum),
@@ -442,10 +445,16 @@ async function main() {
   console.log();
 
   // 4. Pre-compute amounts, hashes, and PDAs
+  // reward_amount = 0 means use full swap_output on-chain
+  const rewardAmount = 0n;
+  const actualReward = rewardAmount === 0n ? swapOutput : rewardAmount;
   const routeAmount = (swapOutput * SCALAR_NUM) / SCALAR_DENOM - FLAT_FEE;
   console.log(`Swap output:    ${swapOutput}`);
+  console.log(
+    `Reward amount:  ${actualReward}${rewardAmount === 0n ? " (full swap output)" : ""}`,
+  );
   console.log(`Route amount:   ${routeAmount}`);
-  console.log(`Solver profit:  ${swapOutput - routeAmount}`);
+  console.log(`Solver profit:  ${actualReward - routeAmount}`);
   console.log();
 
   const routeHash = computeRouteHash(
@@ -459,7 +468,7 @@ async function main() {
     creator: user,
     prover: HYPER_PROVER,
     nativeAmount: 0n,
-    tokens: [{ token: USDC_MINT, amount: swapOutput }],
+    tokens: [{ token: USDC_MINT, amount: actualReward }],
   });
   const intentHash = computeIntentHash(BASE_CHAIN_ID, routeHash, rewardHash);
 
@@ -517,6 +526,7 @@ async function main() {
     rewardCreator: user,
     rewardProver: HYPER_PROVER,
     rewardToken: USDC_MINT,
+    rewardAmount: rewardAmount,
     flatFee: FLAT_FEE,
     scalarNum: SCALAR_NUM,
     scalarDenom: SCALAR_DENOM,
