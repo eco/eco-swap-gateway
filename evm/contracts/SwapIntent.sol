@@ -46,15 +46,42 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
             revert InvalidScalar();
         }
 
-        // 2. Pull input tokens from the caller.
+        // 2. Pull input tokens and execute swap.
+        uint256 swapOutput = _executeSwap(inputToken, inputAmount, outputToken, calls);
+
+        // 3. Calculate route amount and patch route template.
+        (uint256 routeAmount, bytes memory route) = _buildRoute(swapOutput, intent);
+
+        // 4. Resolve reward amount: 0 means use full swapOutput.
+        uint256 actualReward = rewardAmount == 0 ? swapOutput : rewardAmount;
+        if (actualReward > swapOutput) revert RewardExceedsSwapOutput();
+
+        // 5. Publish and fund intent.
+        intentHash = _publishAndFund(outputToken, actualReward, route, intent);
+
+        // 6. Emit event.
+        emit IntentCreated(intentHash, msg.sender, outputToken, swapOutput, routeAmount, intent.destination);
+
+        // 7. Cleanup: reset approval, sweep residual tokens.
+        IERC20(outputToken).forceApprove(address(portal), 0);
+        _sweepToken(inputToken, sweepRecipient);
+        _sweepToken(outputToken, sweepRecipient);
+    }
+
+    // --- Internal helpers ---
+
+    function _executeSwap(
+        address inputToken,
+        uint256 inputAmount,
+        address outputToken,
+        Call[] calldata calls
+    ) internal returns (uint256 swapOutput) {
         if (inputAmount > 0) {
             IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
         }
 
-        // 3. Snapshot output token balance before swap.
         uint256 preBalance = IERC20(outputToken).balanceOf(address(this));
 
-        // 4. Execute swap calls. Block calls to this contract and the portal.
         for (uint256 i; i < calls.length; ++i) {
             if (calls[i].target == address(this) || calls[i].target == address(portal)) {
                 revert InvalidCallTarget(calls[i].target);
@@ -64,15 +91,18 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
             if (!success) revert CallFailed(i, returnData);
         }
 
-        // 5. Measure swap output.
-        uint256 postBalance = IERC20(outputToken).balanceOf(address(this));
-        uint256 swapOutput = postBalance - preBalance;
+        swapOutput = IERC20(outputToken).balanceOf(address(this)) - preBalance;
         if (swapOutput == 0) revert InsufficientSwapOutput();
+    }
 
-        // 6. Calculate route amount in source decimals, then convert to destination decimals.
+    function _buildRoute(uint256 swapOutput, IntentParams calldata intent)
+        internal
+        pure
+        returns (uint256 routeAmount, bytes memory route)
+    {
         uint256 scaled = (swapOutput * intent.scalarNum) / intent.scalarDenom;
         if (scaled <= intent.flatFee) revert RouteAmountZero();
-        uint256 routeAmount = scaled - intent.flatFee;
+        routeAmount = scaled - intent.flatFee;
 
         if (intent.sourceDecimals > intent.destinationDecimals) {
             routeAmount = routeAmount / (10 ** (intent.sourceDecimals - intent.destinationDecimals));
@@ -81,16 +111,15 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         }
         if (routeAmount == 0) revert RouteAmountZero();
 
-        // 7. Patch route template.
-        bytes memory route = _patchRoute(
-            intent.routeTemplate, intent.tokensAmountOffset, intent.calldataAmountOffset, routeAmount
-        );
+        route = _patchRoute(intent.routeTemplate, intent.tokensAmountOffset, intent.calldataAmountOffset, routeAmount);
+    }
 
-        // 8. Resolve reward amount: 0 means use full swapOutput.
-        uint256 actualReward = rewardAmount == 0 ? swapOutput : rewardAmount;
-        if (actualReward > swapOutput) revert RewardExceedsSwapOutput();
-
-        // 9. Build reward.
+    function _publishAndFund(
+        address outputToken,
+        uint256 actualReward,
+        bytes memory route,
+        IntentParams calldata intent
+    ) internal returns (bytes32 intentHash) {
         TokenAmount[] memory tokens = new TokenAmount[](1);
         tokens[0] = TokenAmount({token: outputToken, amount: actualReward});
         Reward memory reward = Reward({
@@ -101,20 +130,9 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
             tokens: tokens
         });
 
-        // 10. Approve Portal and publish + fund.
         IERC20(outputToken).forceApprove(address(portal), actualReward);
         (intentHash,) = portal.publishAndFund(intent.destination, route, reward, intent.allowPartial);
-
-        // 11. Emit event.
-        emit IntentCreated(intentHash, msg.sender, outputToken, swapOutput, routeAmount, intent.destination);
-
-        // 12. Cleanup: reset approval, sweep residual tokens.
-        IERC20(outputToken).forceApprove(address(portal), 0);
-        _sweepToken(inputToken, sweepRecipient);
-        _sweepToken(outputToken, sweepRecipient);
     }
-
-    // --- Internal helpers ---
 
     function _patchRoute(bytes calldata template, uint32 tokensOffset, uint32 calldataOffset, uint256 value)
         internal

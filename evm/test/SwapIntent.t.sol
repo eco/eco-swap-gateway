@@ -411,6 +411,62 @@ contract SwapIntentTest is Test {
         assertEq(intentHash, expectedHash);
     }
 
+    function test_integration_defaultReward_vaultHoldsFullSwapOutput() public {
+        // rewardAmount = 0 → vault gets full swapOutput
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+
+        bytes memory route = _buildRouteTemplate();
+        assembly {
+            mstore(add(add(route, 0x20), 32), SWAP_AMOUNT)
+            mstore(add(add(route, 0x20), 96), SWAP_AMOUNT)
+        }
+
+        Reward memory reward = _buildReward(SWAP_AMOUNT);
+        address vault = portal.intentVaultAddress(intent.destination, route, reward);
+
+        _doSwap(SWAP_AMOUNT, intent, 0);
+
+        assertEq(outputToken.balanceOf(vault), SWAP_AMOUNT);
+        assertEq(outputToken.balanceOf(user), 0);
+    }
+
+    function test_integration_customReward_vaultHoldsPartial() public {
+        // rewardAmount = 800_000, swapOutput = 1_000_000 → vault gets 800k, user swept 200k
+        uint256 customReward = 800_000;
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+
+        bytes memory route = _buildRouteTemplate();
+        assembly {
+            mstore(add(add(route, 0x20), 32), SWAP_AMOUNT)
+            mstore(add(add(route, 0x20), 96), SWAP_AMOUNT)
+        }
+
+        // Reward uses customReward, not swapOutput
+        TokenAmount[] memory tokens = new TokenAmount[](1);
+        tokens[0] = TokenAmount({token: address(outputToken), amount: customReward});
+        Reward memory reward = Reward({
+            deadline: intent.rewardDeadline,
+            creator: user,
+            prover: prover,
+            nativeAmount: 0,
+            tokens: tokens
+        });
+        address vault = portal.intentVaultAddress(intent.destination, route, reward);
+
+        _doSwap(SWAP_AMOUNT, intent, customReward);
+
+        // Vault holds customReward, user gets the difference
+        assertEq(outputToken.balanceOf(vault), customReward);
+        assertEq(outputToken.balanceOf(user), SWAP_AMOUNT - customReward);
+        assertEq(outputToken.balanceOf(address(swapIntent)), 0);
+    }
+
     // ─── Reentrancy ───────────────────────────────────────────────
 
     function test_revert_reentrancy() public {
