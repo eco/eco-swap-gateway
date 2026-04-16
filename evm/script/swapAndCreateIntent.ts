@@ -255,6 +255,7 @@ async function main() {
         destinationDecimals: 6, // USDC on Base
         allowPartial: false,
       },
+      0n, // rewardAmount (0 = use full swapOutput)
       account.address, // sweepRecipient
     ],
   });
