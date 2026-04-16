@@ -12,7 +12,8 @@ import {ISwapIntent, IntentParams} from "./interfaces/ISwapIntent.sol";
 
 /// @title SwapIntent
 /// @notice Atomically swaps tokens via arbitrary DEX calls and creates a Portal
-///         intent whose reward amount equals the actual swap output.
+///         intent. The reward amount defaults to the full swap output, or can be
+///         set explicitly (useful for custom route calls where the user keeps some output).
 /// @dev Does not support fee-on-transfer tokens as outputToken.
 contract SwapIntent is ISwapIntent, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -37,6 +38,7 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         address outputToken,
         Call[] calldata calls,
         IntentParams calldata intent,
+        uint256 rewardAmount,
         address sweepRecipient
     ) external nonReentrant returns (bytes32 intentHash) {
         // 1. Validate scalar parameters.
@@ -84,9 +86,13 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
             intent.routeTemplate, intent.tokensAmountOffset, intent.calldataAmountOffset, routeAmount
         );
 
-        // 8. Build reward with actual swap output.
+        // 8. Resolve reward amount: 0 means use full swapOutput.
+        uint256 actualReward = rewardAmount == 0 ? swapOutput : rewardAmount;
+        if (actualReward > swapOutput) revert RewardExceedsSwapOutput();
+
+        // 9. Build reward.
         TokenAmount[] memory tokens = new TokenAmount[](1);
-        tokens[0] = TokenAmount({token: outputToken, amount: swapOutput});
+        tokens[0] = TokenAmount({token: outputToken, amount: actualReward});
         Reward memory reward = Reward({
             deadline: intent.rewardDeadline,
             creator: intent.rewardCreator,
@@ -95,14 +101,14 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
             tokens: tokens
         });
 
-        // 9. Approve Portal and publish + fund.
-        IERC20(outputToken).forceApprove(address(portal), swapOutput);
+        // 10. Approve Portal and publish + fund.
+        IERC20(outputToken).forceApprove(address(portal), actualReward);
         (intentHash,) = portal.publishAndFund(intent.destination, route, reward, intent.allowPartial);
 
-        // 10. Emit event.
+        // 11. Emit event.
         emit IntentCreated(intentHash, msg.sender, outputToken, swapOutput, routeAmount, intent.destination);
 
-        // 11. Cleanup: reset approval, sweep residual tokens.
+        // 12. Cleanup: reset approval, sweep residual tokens.
         IERC20(outputToken).forceApprove(address(portal), 0);
         _sweepToken(inputToken, sweepRecipient);
         _sweepToken(outputToken, sweepRecipient);

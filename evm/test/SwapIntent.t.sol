@@ -85,10 +85,14 @@ contract SwapIntentTest is Test {
     }
 
     function _doSwap(uint256 amount, IntentParams memory intent) internal returns (bytes32) {
+        return _doSwap(amount, intent, 0);
+    }
+
+    function _doSwap(uint256 amount, IntentParams memory intent, uint256 rewardAmount) internal returns (bytes32) {
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), amount);
         bytes32 intentHash = swapIntent.swapAndCreateIntent(
-            address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent, user
+            address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent, rewardAmount, user
         );
         vm.stopPrank();
         return intentHash;
@@ -140,7 +144,7 @@ contract SwapIntentTest is Test {
         emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, 992_000, 1);
 
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -162,7 +166,7 @@ contract SwapIntentTest is Test {
         emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), amount, 1_980_000, 1);
 
         swapIntent.swapAndCreateIntent(
-            address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent, user
+            address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -180,7 +184,7 @@ contract SwapIntentTest is Test {
         emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, SWAP_AMOUNT, 1);
 
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -210,7 +214,7 @@ contract SwapIntentTest is Test {
 
         vm.prank(user);
         bytes32 intentHash = swapIntent.swapAndCreateIntent(
-            address(inputToken), 0, address(outputToken), calls, intent, user
+            address(inputToken), 0, address(outputToken), calls, intent, 0, user
         );
         assertTrue(intentHash != bytes32(0));
     }
@@ -244,25 +248,70 @@ contract SwapIntentTest is Test {
         assertEq(inputToken.balanceOf(user), userInputBefore - SWAP_AMOUNT);
     }
 
-    function test_sweepsToCustomRecipient() public {
-        address recipient = makeAddr("recipient");
-        dex.setRate(0.5e18); // DEX returns half, so residual output tokens exist
+    // ─── Custom reward amount ────────────────────────────────────
 
+    function test_customRewardAmount() public {
+        // swapOutput = 1_000_000, custom reward = 800_000 → 200_000 swept to user
+        uint256 customReward = 800_000;
         IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+
+        bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent, customReward);
+        assertTrue(intentHash != bytes32(0));
+
+        // Contract is empty
+        assertEq(outputToken.balanceOf(address(swapIntent)), 0);
+        // Excess swept to user: swapOutput - customReward = 200_000
+        assertEq(outputToken.balanceOf(user), SWAP_AMOUNT - customReward);
+    }
+
+    function test_customRewardAmount_sweepsToRecipient() public {
+        address recipient = makeAddr("recipient");
+        uint256 customReward = 600_000;
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, recipient
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, customReward, recipient
         );
         vm.stopPrank();
 
-        assertEq(inputToken.balanceOf(address(swapIntent)), 0);
         assertEq(outputToken.balanceOf(address(swapIntent)), 0);
-        // Residual tokens go to recipient, not user
-        assertEq(inputToken.balanceOf(recipient), 0); // no input residual (DEX consumed all)
-        assertEq(outputToken.balanceOf(recipient), 0); // output fully locked in Portal vault
+        assertEq(outputToken.balanceOf(recipient), SWAP_AMOUNT - customReward);
         assertEq(outputToken.balanceOf(user), 0);
+    }
+
+    function test_zeroRewardAmount_usesFullSwapOutput() public {
+        // rewardAmount = 0 → use swapOutput, no output tokens swept
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+
+        _doSwap(SWAP_AMOUNT, intent, 0);
+        assertEq(outputToken.balanceOf(user), 0);
+        assertEq(outputToken.balanceOf(address(swapIntent)), 0);
+    }
+
+    function test_revert_rewardExceedsSwapOutput() public {
+        IntentParams memory intent = _defaultIntentParams();
+        intent.scalarNum = 1;
+        intent.scalarDenom = 1;
+        intent.flatFee = 0;
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.RewardExceedsSwapOutput.selector);
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, SWAP_AMOUNT + 1, user
+        );
+        vm.stopPrank();
     }
 
     // ─── Integration: Portal state verification ───────────────────
@@ -382,7 +431,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert();
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
         vm.stopPrank();
     }
@@ -402,7 +451,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(abi.encodeWithSelector(ISwapIntent.InvalidCallTarget.selector, address(swapIntent)));
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
         vm.stopPrank();
     }
@@ -420,7 +469,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(abi.encodeWithSelector(ISwapIntent.InvalidCallTarget.selector, address(portal)));
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
         vm.stopPrank();
     }
@@ -440,7 +489,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(abi.encodeWithSelector(ISwapIntent.InvalidCallTarget.selector, address(swapIntent)));
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
         vm.stopPrank();
     }
@@ -460,7 +509,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert();
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
         vm.stopPrank();
     }
@@ -483,7 +532,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert();
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
         vm.stopPrank();
     }
@@ -496,7 +545,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.InsufficientSwapOutput.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
         vm.stopPrank();
     }
@@ -511,7 +560,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.InvalidScalar.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -524,7 +573,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.InvalidScalar.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -538,7 +587,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.InvalidScalar.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -556,7 +605,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.InsufficientSwapOutput.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -571,7 +620,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.RouteAmountZero.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -584,7 +633,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.RouteAmountZero.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -599,7 +648,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.OffsetOutOfBounds.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -613,7 +662,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.OffsetOutOfBounds.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -646,7 +695,7 @@ contract SwapIntentTest is Test {
         emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), amount, 2, 1);
 
         swapIntent.swapAndCreateIntent(
-            address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent, user
+            address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -668,7 +717,7 @@ contract SwapIntentTest is Test {
         emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, 1_000_000_000_000_000_000, 1);
 
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -689,7 +738,7 @@ contract SwapIntentTest is Test {
         emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, SWAP_AMOUNT, 1);
 
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -708,7 +757,7 @@ contract SwapIntentTest is Test {
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         vm.expectRevert(ISwapIntent.RouteAmountZero.selector);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
         );
         vm.stopPrank();
     }
@@ -753,7 +802,7 @@ contract SwapIntentTest is Test {
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), inputAmount);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), inputAmount, address(outputToken), _buildSwapCalls(inputAmount), intent, user
+            address(inputToken), inputAmount, address(outputToken), _buildSwapCalls(inputAmount), intent, 0, user
         );
         vm.stopPrank();
 

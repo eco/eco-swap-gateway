@@ -41,6 +41,7 @@ interface ISwapIntent {
     error CallFailed(uint256 index, bytes reason);
     error InvalidCallTarget(address target);
     error InvalidPortal();
+    error RewardExceedsSwapOutput();
 
     // --- Core ---
 
@@ -54,6 +55,7 @@ interface ISwapIntent {
     /// @param outputToken     ERC20 token expected from the swap (reward token).
     /// @param calls           Arbitrary calls for swap execution (approve, swap, etc.).
     /// @param intent          Intent creation parameters.
+    /// @param rewardAmount    Reward locked for the solver. 0 = use full swapOutput.
     /// @param sweepRecipient  Address to receive residual tokens after the swap.
     /// @return intentHash Hash of the created intent.
     function swapAndCreateIntent(
@@ -62,6 +64,7 @@ interface ISwapIntent {
         address outputToken,
         Call[] calldata calls,
         IntentParams calldata intent,
+        uint256 rewardAmount,
         address sweepRecipient
     ) external returns (bytes32 intentHash);
 }
