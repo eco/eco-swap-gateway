@@ -32,4 +32,6 @@ pub enum SwapIntentError {
     InvalidTokenAccount,
     #[msg("Remaining accounts length must be a multiple of 3 (from_ata, vault_ata, mint)")]
     InvalidRemainingAccounts,
+    #[msg("Reward amount exceeds swap output")]
+    RewardExceedsSwapOutput,
 }

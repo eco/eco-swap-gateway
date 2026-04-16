@@ -189,8 +189,10 @@ impl Context {
         scalar_denom: u64,
         source_decimals: u8,
         destination_decimals: u8,
+        reward_amount: u64,
     ) -> Instruction {
         let swap_output = post_balance - pre_balance;
+        let actual_reward = if reward_amount == 0 { swap_output } else { reward_amount };
         let net_amount = swap_output * scalar_num / scalar_denom - flat_fee;
         let route_amount = convert_decimals(net_amount as u128, source_decimals, destination_decimals);
         let destination: u64 = 1; // Ethereum mainnet
@@ -212,7 +214,7 @@ impl Context {
             native_amount: 0,
             tokens: vec![portal::types::TokenAmount {
                 token: self.mint,
-                amount: swap_output,
+                amount: actual_reward,
             }],
         };
         let reward_hash = reward.hash();
@@ -235,6 +237,7 @@ impl Context {
             reward_creator: self.user.pubkey(),
             reward_prover: reward.prover,
             reward_token: self.mint,
+            reward_amount,
             flat_fee,
             scalar_num,
             scalar_denom,
@@ -278,8 +281,10 @@ impl Context {
         scalar_denom: u64,
         source_decimals: u8,
         destination_decimals: u8,
+        reward_amount: u64,
     ) -> Instruction {
         let swap_output = post_balance - pre_balance;
+        let actual_reward = if reward_amount == 0 { swap_output } else { reward_amount };
         let net_amount = swap_output * scalar_num / scalar_denom - flat_fee;
         let route_amount = convert_decimals(net_amount as u128, source_decimals, destination_decimals);
         let destination: u64 = 1;
@@ -299,7 +304,7 @@ impl Context {
             native_amount: 0,
             tokens: vec![portal::types::TokenAmount {
                 token: self.mint,
-                amount: swap_output,
+                amount: actual_reward,
             }],
         };
         let reward_hash = reward.hash();
@@ -321,6 +326,7 @@ impl Context {
             reward_creator: self.user.pubkey(),
             reward_prover: reward.prover,
             reward_token: self.mint,
+            reward_amount,
             flat_fee,
             scalar_num,
             scalar_denom,
@@ -376,6 +382,7 @@ impl Context {
             reward_creator: self.user.pubkey(),
             reward_prover: Pubkey::new_unique(),
             reward_token: self.mint,
+            reward_amount: 0,
             flat_fee,
             scalar_num,
             scalar_denom,
@@ -424,6 +431,7 @@ impl Context {
             reward_creator: self.user.pubkey(),
             reward_prover: Pubkey::new_unique(),
             reward_token: wrong_token, // deliberately wrong
+            reward_amount: 0,
             flat_fee: 0,
             scalar_num: 1,
             scalar_denom: 1,
@@ -471,6 +479,7 @@ impl Context {
             reward_creator: self.user.pubkey(),
             reward_prover: Pubkey::new_unique(),
             reward_token: self.mint,
+            reward_amount: 0,
             flat_fee: 0,
             scalar_num: 1,
             scalar_denom: 1,
@@ -490,6 +499,55 @@ impl Context {
                 AccountMeta::new(self.user.pubkey(), true),
                 AccountMeta::new(swap_state, false),
                 AccountMeta::new_readonly(wrong_ata, false), // wrong token account
+                AccountMeta::new_readonly(portal::ID, false),
+                AccountMeta::new(dummy_vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
+                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
+                AccountMeta::new_readonly(system_program::ID, false),
+                AccountMeta::new(self.user_ata(), false),
+                AccountMeta::new(vault_ata, false),
+                AccountMeta::new_readonly(self.mint, false),
+            ],
+        )
+    }
+
+    /// Build close_and_create_intent with a custom reward_amount for error testing.
+    /// Uses a dummy vault since the tx will revert before vault validation.
+    pub fn close_and_create_ix_error_case_with_reward(&self, reward_amount: u64) -> Instruction {
+        let (swap_state, _) = self.swap_state_pda();
+        let dummy_vault = Pubkey::new_unique();
+        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
+
+        let args = swap_intent::instructions::CreateIntentArgs {
+            destination: 1,
+            route_template: vec![0u8; 128],
+            tokens_amount_offset: 32,
+            calldata_amount_offset: 96,
+            reward_deadline: u64::MAX,
+            reward_creator: self.user.pubkey(),
+            reward_prover: Pubkey::new_unique(),
+            reward_token: self.mint,
+            reward_amount,
+            flat_fee: 0,
+            scalar_num: 1,
+            scalar_denom: 1,
+            source_decimals: 6,
+            destination_decimals: 6,
+            allow_partial: false,
+            extra_calls: vec![],
+        };
+
+        let mut data = anchor_discriminator("close_and_create_intent");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        Instruction::new_with_bytes(
+            swap_intent::ID,
+            &data,
+            vec![
+                AccountMeta::new(self.user.pubkey(), true),
+                AccountMeta::new(swap_state, false),
+                AccountMeta::new_readonly(self.user_ata(), false),
                 AccountMeta::new_readonly(portal::ID, false),
                 AccountMeta::new(dummy_vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),

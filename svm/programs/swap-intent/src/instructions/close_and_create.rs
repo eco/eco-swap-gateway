@@ -45,6 +45,9 @@ pub struct CreateIntentArgs {
     /// SPL mint of the reward token (must match the swap output token).
     pub reward_token: Pubkey,
 
+    /// Reward amount locked for the solver. 0 = use full swap_output.
+    pub reward_amount: u64,
+
     /// Fixed fee subtracted after scaling (in output token units, post-scalar).
     pub flat_fee: u64,
 
@@ -120,6 +123,7 @@ pub fn close_and_create<'info>(
         reward_creator,
         reward_prover,
         reward_token,
+        reward_amount,
         flat_fee,
         scalar_num,
         scalar_denom,
@@ -153,7 +157,14 @@ pub fn close_and_create<'info>(
         .ok_or(SwapIntentError::ArithmeticOverflow)?;
     require!(swap_output > 0, SwapIntentError::InsufficientSwapOutput);
 
-    // 5. Calculate fee-adjusted amount in source decimals, then convert to destination decimals.
+    // 5. Resolve reward amount: 0 means use full swap_output.
+    let actual_reward = if reward_amount == 0 { swap_output } else { reward_amount };
+    require!(
+        actual_reward <= swap_output,
+        SwapIntentError::RewardExceedsSwapOutput
+    );
+
+    // 6. Calculate fee-adjusted amount in source decimals.
     //    Uses u128 intermediate to avoid overflow on large swap_output * scalar_num.
     //    Integer division truncates toward zero (floor), which is standard for on-chain fee math.
     let scaled = (swap_output as u128)
@@ -166,7 +177,7 @@ pub fn close_and_create<'info>(
         .ok_or(SwapIntentError::ArithmeticOverflow)?;
     require!(net_amount > 0, SwapIntentError::RouteAmountZero);
 
-    // 6. Convert from source decimals to destination decimals.
+    // 7. Convert from source decimals to destination decimals.
     //    Scaling UP (dest > source) can overflow u64, so route_amount is u128.
     //    Scaling DOWN (source > dest) truncates via integer division (may produce 0).
     let route_amount: u128 = if source_decimals > destination_decimals {
@@ -186,7 +197,7 @@ pub fn close_and_create<'info>(
     };
     require!(route_amount > 0, SwapIntentError::RouteAmountZero);
 
-    // 7. Patch route_template at tokens_amount_offset (always)
+    // 8. Patch route_template at tokens_amount_offset (always)
     let amount_bytes = to_be_uint256(route_amount);
     patch_route_template(
         &mut route_template,
@@ -194,7 +205,7 @@ pub fn close_and_create<'info>(
         &amount_bytes,
     )?;
 
-    // 8. Patch route_template at calldata_amount_offset (skip if sentinel u32::MAX)
+    // 9. Patch route_template at calldata_amount_offset (skip if sentinel u32::MAX)
     if calldata_amount_offset != SKIP_CALLDATA_PATCH {
         patch_route_template(
             &mut route_template,
@@ -203,12 +214,12 @@ pub fn close_and_create<'info>(
         )?;
     }
 
-    // 9. Compute route_hash = keccak256(patched_route)
+    // 10. Compute route_hash = keccak256(patched_route)
     let route_hash = keccak256(&route_template);
 
-    // 10. Build Reward and compute hashes.
-    //    reward.tokens[0].amount = swap_output (full swap output locked in vault as solver reward).
-    //    The solver fronts route_amount on the destination chain and claims swap_output as profit.
+    // 11. Build Reward and compute hashes.
+    //    reward.tokens[0].amount = actual_reward (may be less than swap_output).
+    //    The solver fronts route_amount on the destination chain and claims actual_reward as profit.
     let reward = portal::types::Reward {
         deadline: reward_deadline,
         creator: reward_creator,
@@ -216,20 +227,20 @@ pub fn close_and_create<'info>(
         native_amount: 0,
         tokens: vec![portal::types::TokenAmount {
             token: reward_token,
-            amount: swap_output,
+            amount: actual_reward,
         }],
     };
     let reward_hash = reward.hash();
     let intent_hash = portal::types::intent_hash(destination, &route_hash, &reward_hash);
 
-    // 11. Validate vault PDA
+    // 12. Validate vault PDA
     let (expected_vault, _) = portal::state::vault_pda(&intent_hash);
     require!(
         ctx.accounts.vault.key() == expected_vault,
         SwapIntentError::InvalidVault
     );
 
-    // 12. CPI Portal::publish
+    // 13. CPI Portal::publish
     let publish_args = portal::instructions::PublishArgs {
         destination,
         route: route_template,
@@ -237,7 +248,7 @@ pub fn close_and_create<'info>(
     };
     cpi::publish::publish(&ctx.accounts.portal_program, publish_args)?;
 
-    // 13. CPI Portal::fund
+    // 14. CPI Portal::fund
     let fund_args = portal::instructions::FundArgs {
         destination,
         route_hash,
@@ -257,12 +268,13 @@ pub fn close_and_create<'info>(
         fund_args,
     )?;
 
-    // 14. Emit event (swap_state close happens via Anchor constraint)
+    // 15. Emit event (swap_state close happens via Anchor constraint)
     emit!(IntentCreated::new(
         intent_hash,
         ctx.accounts.user.key(),
         reward_token,
         swap_output,
+        actual_reward,
         route_amount,
         destination,
     ));

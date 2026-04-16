@@ -47,6 +47,7 @@ fn open_swap_close_and_create_intent_success() {
         scalar_denom,
         6,
         6,
+        0,
     );
     ctx.send(&[ix]).unwrap();
 
@@ -72,7 +73,7 @@ fn close_and_create_intent_skip_calldata_patch() {
     ctx.mint_to_user(swap_amount);
 
     let ix =
-        ctx.close_and_create_ix_skip_calldata(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6);
+        ctx.close_and_create_ix_skip_calldata(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6, 0);
     ctx.send(&[ix]).unwrap();
 
     // Verify state PDA is closed and tokens transferred
@@ -245,7 +246,7 @@ fn fee_calculation_matches_expected() {
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
-    let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6);
+    let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6, 0);
     ctx.send(&[ix]).unwrap();
 
     // If the transaction succeeded, the fee calculation matched (otherwise vault PDA would mismatch)
@@ -355,7 +356,7 @@ fn decimal_conversion_same_decimals() {
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
-    let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6);
+    let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6, 0);
     ctx.send(&[ix]).unwrap();
 
     let (swap_state_pda, _) = ctx.swap_state_pda();
@@ -376,7 +377,7 @@ fn decimal_conversion_6_to_18() {
     ctx.mint_to_user(swap_amount);
 
     // No fees, scalar 1:1, source=6, dest=18
-    let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 6, 18);
+    let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 6, 18, 0);
     ctx.send(&[ix]).unwrap();
 
     let (swap_state_pda, _) = ctx.swap_state_pda();
@@ -396,7 +397,7 @@ fn decimal_conversion_18_to_6() {
     ctx.mint_to_user(swap_amount);
 
     // No fees, scalar 1:1, source=18, dest=6
-    let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 18, 6);
+    let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 18, 6, 0);
     ctx.send(&[ix]).unwrap();
 
     let (swap_state_pda, _) = ctx.swap_state_pda();
@@ -421,4 +422,84 @@ fn decimal_conversion_truncates_to_zero() {
         "Expected RouteAmountZero, got: {:?}",
         err.err
     );
+}
+
+// ─── Custom Reward Amount Tests ─────────────────────────────────────────────
+
+/// Default reward (reward_amount = 0): vault gets full swap_output, user keeps pre_balance.
+#[test]
+fn default_reward_uses_full_swap_output() {
+    let mut ctx = Context::new();
+
+    let pre_balance = 100_000;
+    let swap_amount = 1_000_000;
+
+    ctx.mint_to_user(pre_balance);
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(swap_amount);
+
+    let ix = ctx.close_and_create_ix(pre_balance, pre_balance + swap_amount, 0, 1, 1, 6, 6, 0);
+    ctx.send(&[ix]).unwrap();
+
+    // User keeps only pre_balance (full swap_output went to vault)
+    assert_eq!(ctx.token_balance(&ctx.user_ata()), pre_balance);
+}
+
+/// Custom reward: vault gets reward_amount, user keeps swap_output - reward_amount.
+#[test]
+fn custom_reward_amount() {
+    let mut ctx = Context::new();
+
+    let swap_amount = 1_000_000;
+    let custom_reward = 600_000;
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(swap_amount);
+
+    let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 6, 6, custom_reward);
+    ctx.send(&[ix]).unwrap();
+
+    // User keeps the difference: swap_output - custom_reward
+    assert_eq!(ctx.token_balance(&ctx.user_ata()), swap_amount - custom_reward);
+}
+
+/// Error: reward_amount exceeds swap_output.
+#[test]
+fn close_fails_with_reward_exceeds_swap_output() {
+    let mut ctx = Context::new();
+
+    let swap_amount = 1_000_000;
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(swap_amount);
+
+    // reward_amount = swap_amount + 1 → exceeds swap_output
+    let ix = ctx.close_and_create_ix_error_case_with_reward(swap_amount + 1);
+    let err = ctx.send(&[ix]).unwrap_err();
+
+    assert!(
+        common::is_custom_error(&err, SwapIntentError::RewardExceedsSwapOutput.into()),
+        "Expected RewardExceedsSwapOutput, got: {:?}",
+        err.err
+    );
+}
+
+/// Integration: custom reward — verify vault holds exactly actual_reward.
+#[test]
+fn integration_custom_reward_vault_balance() {
+    let mut ctx = Context::new();
+
+    let swap_amount = 1_000_000;
+    let custom_reward = 700_000;
+
+    ctx.send(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(swap_amount);
+
+    let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 6, 6, custom_reward);
+    ctx.send(&[ix]).unwrap();
+
+    let (swap_state_pda, _) = ctx.swap_state_pda();
+    assert!(!ctx.account_exists(&swap_state_pda));
+    // User keeps excess, contract holds nothing
+    assert_eq!(ctx.token_balance(&ctx.user_ata()), swap_amount - custom_reward);
 }
