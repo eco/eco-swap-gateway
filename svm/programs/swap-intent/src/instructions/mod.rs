@@ -2,11 +2,13 @@ use anchor_lang::prelude::*;
 
 mod cancel;
 mod close_and_create;
+mod close_route_buffer;
 mod open;
 mod write_route_buffer;
 
 pub use cancel::*;
 pub use close_and_create::*;
+pub use close_route_buffer::*;
 pub use open::*;
 pub use write_route_buffer::*;
 

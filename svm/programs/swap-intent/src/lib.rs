@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("SwapWDrRP31o8gbK5cpHmKyFC4BjHEkZB5ZqbHq4VUH");
+declare_id!("SwapXCqJ3cwYZVUinbG6zxJYLgX4joT9KqvGqetnj5d");
 
 pub mod constants;
 pub mod cpi;
@@ -34,5 +34,9 @@ pub mod swap_intent {
 
     pub fn cancel(ctx: Context<Cancel>) -> Result<()> {
         cancel_swap(ctx)
+    }
+
+    pub fn close_route_buffer(ctx: Context<CloseRouteBuffer>) -> Result<()> {
+        instructions::close_route_buffer(ctx)
     }
 }

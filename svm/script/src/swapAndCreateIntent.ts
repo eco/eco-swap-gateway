@@ -15,6 +15,7 @@
 import "dotenv/config";
 import crypto from "crypto";
 import {
+  AddressLookupTableProgram,
   Connection,
   Keypair,
   PublicKey,
@@ -44,7 +45,8 @@ import bs58 from "bs58";
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
-const FARTCOIN_AMOUNT = 1_000_000n; // 1M Fartcoin (adjusted by decimals below)
+const FARTCOIN_AMOUNT = 0n; // Use raw amount below instead
+const FARTCOIN_RAW_AMOUNT = 300_000n; // 0.3 Fartcoin (raw, 6 decimals)
 const FARTCOIN_DECIMALS = 6;
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -55,7 +57,7 @@ const FARTCOIN_MINT = new PublicKey(
 );
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 const SWAP_INTENT_PROGRAM = new PublicKey(
-  "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk",
+  "SwapXCqJ3cwYZVUinbG6zxJYLgX4joT9KqvGqetnj5d",
 );
 const PORTAL_PROGRAM = new PublicKey(
   "Ecoo5HDM2XCBy7QzkhDGrAmnRcWw7emU6xGr7CcCmooo",
@@ -80,11 +82,18 @@ const SOURCE_DECIMALS = 6; // USDC on Solana
 const DESTINATION_DECIMALS = 6; // USDC on Base
 
 // Instruction discriminators (from Anchor IDL)
+const WRITE_ROUTE_BUFFER_DISCRIMINATOR = Buffer.from([
+  75, 235, 140, 42, 51, 248, 84, 98,
+]);
 const OPEN_DISCRIMINATOR = Buffer.from([228, 220, 155, 71, 199, 189, 60, 45]);
 const CLOSE_DISCRIMINATOR = Buffer.from([122, 166, 202, 12, 24, 110, 189, 7]);
+const CANCEL_DISCRIMINATOR = Buffer.from([
+  232, 219, 223, 41, 219, 236, 220, 190,
+]);
 
 // PDA seeds
 const SWAP_STATE_SEED = Buffer.from("swap_state");
+const ROUTE_BUFFER_SEED = Buffer.from("route_buffer");
 const VAULT_SEED = Buffer.from("vault");
 
 // Skip calldata patch sentinel
@@ -263,13 +272,29 @@ function computeIntentHash(
   return keccak256(Buffer.concat([destBuf, routeHash, rewardHash]));
 }
 
-// ─── Borsh Encoding for CreateIntentArgs ───────────────────────────────────
+// ─── Borsh Encoding ────────────────────────────────────────────────────────
 
+/** Encode WriteRouteBufferArgs: route_template (Vec<u8>) + two u32 offsets */
+function encodeWriteRouteBufferArgs(
+  routeTemplate: Buffer,
+  tokensAmountOffset: number,
+  calldataAmountOffset: number,
+): Buffer {
+  const offsetBuf1 = Buffer.alloc(4);
+  offsetBuf1.writeUInt32LE(tokensAmountOffset);
+  const offsetBuf2 = Buffer.alloc(4);
+  offsetBuf2.writeUInt32LE(calldataAmountOffset);
+  return Buffer.concat([
+    writeU32LE(routeTemplate.length),
+    routeTemplate,
+    offsetBuf1,
+    offsetBuf2,
+  ]);
+}
+
+/** Encode CreateIntentArgs (no route — read from buffer PDA) */
 function encodeCreateIntentArgs(args: {
   destination: bigint;
-  routeTemplate: Buffer;
-  tokensAmountOffset: number;
-  calldataAmountOffset: number;
   rewardDeadline: bigint;
   rewardCreator: PublicKey;
   rewardProver: PublicKey;
@@ -281,49 +306,21 @@ function encodeCreateIntentArgs(args: {
   sourceDecimals: number;
   destinationDecimals: number;
   allowPartial: boolean;
-  extraCalls: Array<{ target: Buffer; data: Buffer }>;
 }): Buffer {
-  const parts: Buffer[] = [
+  return Buffer.concat([
     writeU64LE(args.destination),
-    // route_template: Vec<u8>
-    writeU32LE(args.routeTemplate.length),
-    args.routeTemplate,
-    // offsets: u32 LE
-    (() => {
-      const b = Buffer.alloc(4);
-      b.writeUInt32LE(args.tokensAmountOffset);
-      return b;
-    })(),
-    (() => {
-      const b = Buffer.alloc(4);
-      b.writeUInt32LE(args.calldataAmountOffset);
-      return b;
-    })(),
-    // reward fields
     writeU64LE(args.rewardDeadline),
     args.rewardCreator.toBuffer(),
     args.rewardProver.toBuffer(),
     args.rewardToken.toBuffer(),
-    // reward_amount: u64 (0 = use full swap_output)
     writeU64LE(args.rewardAmount),
-    // fee params
     writeU64LE(args.flatFee),
     writeU64LE(args.scalarNum),
     writeU64LE(args.scalarDenom),
-    // decimal config
     Buffer.from([args.sourceDecimals]),
     Buffer.from([args.destinationDecimals]),
-    // allow_partial: bool
     Buffer.from([args.allowPartial ? 1 : 0]),
-    // extra_calls: Vec<EvmCall>
-    writeU32LE(args.extraCalls.length),
-  ];
-  for (const call of args.extraCalls) {
-    parts.push(call.target); // [u8; 32]
-    parts.push(writeU32LE(call.data.length));
-    parts.push(call.data);
-  }
-  return Buffer.concat(parts);
+  ]);
 }
 
 // ─── Jupiter API ───────────────────────────────────────────────────────────
@@ -356,7 +353,9 @@ async function getJupiterQuote(
   outputMint: string,
   amount: bigint,
 ): Promise<JupiterQuote> {
-  const url = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=0`;
+  // 300 bps (3%) slippage for volatile tokens. The actual swap output is read
+  // after confirmation to compute the exact vault PDA for close_and_create.
+  const url = `https://api.jup.ag/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=300`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Jupiter quote failed: ${res.statusText}`);
   return res.json();
@@ -366,7 +365,7 @@ async function getJupiterSwapInstructions(
   quote: JupiterQuote,
   userPublicKey: string,
 ): Promise<JupiterSwapInstructions> {
-  const res = await fetch("https://quote-api.jup.ag/v6/swap-instructions", {
+  const res = await fetch("https://api.jup.ag/swap/v1/swap-instructions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -409,11 +408,13 @@ async function main() {
   const connection = new Connection(rpcUrl, "confirmed");
   const user = keypair.publicKey;
 
-  const inputAmount = FARTCOIN_AMOUNT * BigInt(10 ** FARTCOIN_DECIMALS);
+  const inputAmount = FARTCOIN_RAW_AMOUNT;
   const rewardDeadline = BigInt(Math.floor(Date.now() / 1000) + 7200);
 
   console.log(`User:           ${user.toBase58()}`);
-  console.log(`Input:          ${FARTCOIN_AMOUNT.toLocaleString()} Fartcoin`);
+  console.log(
+    `Input:          ${Number(inputAmount) / 10 ** FARTCOIN_DECIMALS} Fartcoin (${inputAmount} raw)`,
+  );
   console.log(`Swap:           Fartcoin → USDC on Solana (Jupiter)`);
   console.log(`Intent:         USDC on Solana → USDC on Base`);
   console.log();
@@ -444,19 +445,209 @@ async function main() {
   console.log(`calldataAmountOffset:    ${calldataAmountOffset}`);
   console.log();
 
-  // 4. Pre-compute amounts, hashes, and PDAs
-  // reward_amount = 0 means use full swap_output on-chain
-  const rewardAmount = 0n;
-  const actualReward = rewardAmount === 0n ? swapOutput : rewardAmount;
-  const routeAmount = (swapOutput * SCALAR_NUM) / SCALAR_DENOM - FLAT_FEE;
-  console.log(`Swap output:    ${swapOutput}`);
-  console.log(
-    `Reward amount:  ${actualReward}${rewardAmount === 0n ? " (full swap output)" : ""}`,
+  // 4. Derive PDAs
+  const rewardAmount = 0n; // 0 = use full swap_output on-chain
+  const [swapStatePda] = PublicKey.findProgramAddressSync(
+    [SWAP_STATE_SEED, user.toBuffer()],
+    SWAP_INTENT_PROGRAM,
   );
-  console.log(`Route amount:   ${routeAmount}`);
-  console.log(`Solver profit:  ${actualReward - routeAmount}`);
+  const [routeBufferPda] = PublicKey.findProgramAddressSync(
+    [ROUTE_BUFFER_SEED, user.toBuffer()],
+    SWAP_INTENT_PROGRAM,
+  );
+  const userUsdcAta = await getAssociatedTokenAddress(USDC_MINT, user);
+
+  // Cancel stale swap state if exists (from a previous failed run)
+  const existingState = await connection.getAccountInfo(swapStatePda);
+  if (existingState && existingState.lamports > 0) {
+    console.log("Found stale swap state PDA — cancelling...");
+    const cancelIx = new TransactionInstruction({
+      programId: SWAP_INTENT_PROGRAM,
+      keys: [
+        { pubkey: user, isSigner: true, isWritable: true },
+        { pubkey: swapStatePda, isSigner: false, isWritable: true },
+      ],
+      data: CANCEL_DISCRIMINATOR,
+    });
+    const { blockhash: cbh, lastValidBlockHeight: clvbh } =
+      await connection.getLatestBlockhash("confirmed");
+    const cancelMsg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: cbh,
+      instructions: [cancelIx],
+    }).compileToV0Message([]);
+    const cancelTx = new VersionedTransaction(cancelMsg);
+    cancelTx.sign([keypair]);
+    const cancelSig = await connection.sendTransaction(cancelTx);
+    await connection.confirmTransaction(
+      { signature: cancelSig, blockhash: cbh, lastValidBlockHeight: clvbh },
+      "confirmed",
+    );
+    console.log(`  Cancelled: ${cancelSig}`);
+    console.log();
+  }
+
+  const preSwapInfo = await connection.getTokenAccountBalance(userUsdcAta);
+  const preSwapBalance = BigInt(preSwapInfo.value.amount);
+  console.log(`Pre-swap USDC:    ${preSwapBalance}`);
+  console.log(`Swap state PDA:   ${swapStatePda.toBase58()}`);
+  console.log(`Route buffer PDA: ${routeBufferPda.toBase58()}`);
   console.log();
 
+  // 5. Resolve Jupiter Address Lookup Tables
+  const lookupTableAddresses = jupiterIxs.addressLookupTableAddresses.map(
+    (addr) => new PublicKey(addr),
+  );
+  const lookupTables: AddressLookupTableAccount[] = [];
+  for (const addr of lookupTableAddresses) {
+    const result = await connection.getAddressLookupTable(addr);
+    if (result.value) lookupTables.push(result.value);
+  }
+
+  // ─── Setup Tx: write_route_buffer ────────────────────────────────────────
+  // Always write a fresh buffer. If a stale one exists (from a failed run),
+  // close it first via close_route_buffer.
+
+  const CLOSE_ROUTE_BUFFER_DISCRIMINATOR = Buffer.from([
+    66, 5, 208, 96, 30, 99, 2, 238,
+  ]);
+
+  const existingBuffer = await connection.getAccountInfo(routeBufferPda);
+  if (existingBuffer && existingBuffer.lamports > 0) {
+    console.log("Closing stale route buffer...");
+    const closeBufferIx = new TransactionInstruction({
+      programId: SWAP_INTENT_PROGRAM,
+      keys: [
+        { pubkey: user, isSigner: true, isWritable: true },
+        { pubkey: routeBufferPda, isSigner: false, isWritable: true },
+      ],
+      data: CLOSE_ROUTE_BUFFER_DISCRIMINATOR,
+    });
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash("confirmed");
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      instructions: [closeBufferIx],
+    }).compileToV0Message([]);
+    const tx = new VersionedTransaction(msg);
+    tx.sign([keypair]);
+    const sig = await connection.sendTransaction(tx, { maxRetries: 3 });
+    await connection.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      "confirmed",
+    );
+    console.log(`  Closed: ${sig}`);
+  }
+
+  console.log("Writing route buffer...");
+  const writeBufferArgs = encodeWriteRouteBufferArgs(
+    routeTemplate,
+    tokensAmountOffset,
+    calldataAmountOffset,
+  );
+  const writeBufferIx = new TransactionInstruction({
+    programId: SWAP_INTENT_PROGRAM,
+    keys: [
+      { pubkey: user, isSigner: true, isWritable: true },
+      { pubkey: routeBufferPda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.concat([WRITE_ROUTE_BUFFER_DISCRIMINATOR, writeBufferArgs]),
+  });
+
+  {
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash("confirmed");
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      instructions: [writeBufferIx],
+    }).compileToV0Message([]);
+    const tx = new VersionedTransaction(msg);
+    tx.sign([keypair]);
+    const sig = await connection.sendTransaction(tx, { maxRetries: 3 });
+    await connection.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      "confirmed",
+    );
+    console.log(`  Confirmed: ${sig}`);
+  }
+  console.log();
+
+  // ─── Tx 1: open + Jupiter swap ─────────────────────────────────────────
+  console.log("Sending Tx 1: open + Jupiter swap...");
+
+  const openIx = new TransactionInstruction({
+    programId: SWAP_INTENT_PROGRAM,
+    keys: [
+      { pubkey: user, isSigner: true, isWritable: true },
+      { pubkey: userUsdcAta, isSigner: false, isWritable: false },
+      { pubkey: swapStatePda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: OPEN_DISCRIMINATOR,
+  });
+
+  const jupiterInstructions: TransactionInstruction[] = [
+    ...jupiterIxs.setupInstructions.map(jupiterIxToInstruction),
+    jupiterIxToInstruction(jupiterIxs.swapInstruction),
+    ...(jupiterIxs.cleanupInstruction
+      ? [jupiterIxToInstruction(jupiterIxs.cleanupInstruction)]
+      : []),
+  ];
+
+  {
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash("confirmed");
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        openIx,
+        ...jupiterInstructions,
+      ],
+    }).compileToV0Message(lookupTables);
+    const tx = new VersionedTransaction(msg);
+    tx.sign([keypair]);
+    const sig = await connection.sendTransaction(tx, { maxRetries: 3 });
+    console.log(`  Signature: ${sig}`);
+    await connection.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      "confirmed",
+    );
+    console.log("  Confirmed!");
+    console.log(`  Explorer: https://solscan.io/tx/${sig}`);
+  }
+  console.log();
+
+  // ─── Read actual swap output ─────────────────────────────────────────────
+  await new Promise((r) => setTimeout(r, 2000));
+  const postSwapInfo = await connection.getTokenAccountBalance(
+    userUsdcAta,
+    "confirmed",
+  );
+  const postSwapBalance = BigInt(postSwapInfo.value.amount);
+  const actualSwapOutput = postSwapBalance - preSwapBalance;
+
+  if (actualSwapOutput <= 0n) {
+    console.error(
+      `Swap output is ${actualSwapOutput}. Pre: ${preSwapBalance}, Post: ${postSwapBalance}`,
+    );
+    process.exit(1);
+  }
+
+  const actualReward = rewardAmount === 0n ? actualSwapOutput : rewardAmount;
+  const routeAmount = (actualSwapOutput * SCALAR_NUM) / SCALAR_DENOM - FLAT_FEE;
+
+  console.log(`Actual swap output: ${actualSwapOutput} USDC`);
+  console.log(`Reward amount:      ${actualReward}`);
+  console.log(`Route amount:       ${routeAmount}`);
+  console.log(`Solver profit:      ${actualReward - routeAmount}`);
+  console.log();
+
+  // ─── Compute vault PDA from actual amounts ───────────────────────────────
   const routeHash = computeRouteHash(
     routeTemplate,
     routeAmount,
@@ -472,68 +663,32 @@ async function main() {
   });
   const intentHash = computeIntentHash(BASE_CHAIN_ID, routeHash, rewardHash);
 
-  const [swapStatePda] = PublicKey.findProgramAddressSync(
-    [SWAP_STATE_SEED, user.toBuffer()],
-    SWAP_INTENT_PROGRAM,
-  );
   const [vault] = PublicKey.findProgramAddressSync(
     [VAULT_SEED, intentHash],
     PORTAL_PROGRAM,
   );
   const vaultAta = await getAssociatedTokenAddress(USDC_MINT, vault, true);
-  const userUsdcAta = await getAssociatedTokenAddress(USDC_MINT, user);
 
-  console.log(`Intent hash:    ${intentHash.toString("hex")}`);
-  console.log(`Vault PDA:      ${vault.toBase58()}`);
-  console.log(`Swap state PDA: ${swapStatePda.toBase58()}`);
+  console.log(`Intent hash: ${intentHash.toString("hex")}`);
+  console.log(`Vault PDA:   ${vault.toBase58()}`);
   console.log();
 
-  // 5. Build instructions
+  // ─── Tx 2: close_and_create_intent ───────────────────────────────────────
+  console.log("Sending Tx 2: close_and_create_intent...");
 
-  // Ix 0: Compute budget
-  const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
-    units: 600_000,
-  });
-
-  // Ix 1: SwapIntent::open
-  const openIx = new TransactionInstruction({
-    programId: SWAP_INTENT_PROGRAM,
-    keys: [
-      { pubkey: user, isSigner: true, isWritable: true },
-      { pubkey: userUsdcAta, isSigner: false, isWritable: false },
-      { pubkey: swapStatePda, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data: OPEN_DISCRIMINATOR,
-  });
-
-  // Ix 2: Jupiter swap (setup + swap + cleanup)
-  const jupiterInstructions: TransactionInstruction[] = [
-    ...jupiterIxs.setupInstructions.map(jupiterIxToInstruction),
-    jupiterIxToInstruction(jupiterIxs.swapInstruction),
-    ...(jupiterIxs.cleanupInstruction
-      ? [jupiterIxToInstruction(jupiterIxs.cleanupInstruction)]
-      : []),
-  ];
-
-  // Ix 3: SwapIntent::close_and_create_intent
   const closeArgs = encodeCreateIntentArgs({
     destination: BASE_CHAIN_ID,
-    routeTemplate,
-    tokensAmountOffset,
-    calldataAmountOffset,
     rewardDeadline,
     rewardCreator: user,
     rewardProver: HYPER_PROVER,
     rewardToken: USDC_MINT,
-    rewardAmount: rewardAmount,
+    rewardAmount,
     flatFee: FLAT_FEE,
     scalarNum: SCALAR_NUM,
     scalarDenom: SCALAR_DENOM,
     sourceDecimals: SOURCE_DECIMALS,
     destinationDecimals: DESTINATION_DECIMALS,
     allowPartial: false,
-    extraCalls: [],
   });
 
   const closeIx = new TransactionInstruction({
@@ -541,6 +696,7 @@ async function main() {
     keys: [
       { pubkey: user, isSigner: true, isWritable: true },
       { pubkey: swapStatePda, isSigner: false, isWritable: true },
+      { pubkey: routeBufferPda, isSigner: false, isWritable: true },
       { pubkey: userUsdcAta, isSigner: false, isWritable: false },
       { pubkey: PORTAL_PROGRAM, isSigner: false, isWritable: false },
       { pubkey: vault, isSigner: false, isWritable: true },
@@ -552,7 +708,6 @@ async function main() {
         isWritable: false,
       },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      // remaining_accounts: [from_ata, vault_ata, mint]
       { pubkey: userUsdcAta, isSigner: false, isWritable: true },
       { pubkey: vaultAta, isSigner: false, isWritable: true },
       { pubkey: USDC_MINT, isSigner: false, isWritable: false },
@@ -560,61 +715,29 @@ async function main() {
     data: Buffer.concat([CLOSE_DISCRIMINATOR, closeArgs]),
   });
 
-  // 6. Resolve Address Lookup Tables
-  const allInstructions = [
-    computeBudgetIx,
-    openIx,
-    ...jupiterInstructions,
-    closeIx,
-  ];
-
-  const lookupTableAddresses = jupiterIxs.addressLookupTableAddresses.map(
-    (addr) => new PublicKey(addr),
-  );
-  const lookupTables: AddressLookupTableAccount[] = [];
-  for (const addr of lookupTableAddresses) {
-    const result = await connection.getAddressLookupTable(addr);
-    if (result.value) lookupTables.push(result.value);
+  {
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash("confirmed");
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        closeIx,
+      ],
+    }).compileToV0Message(lookupTables);
+    const tx = new VersionedTransaction(msg);
+    tx.sign([keypair]);
+    const signature = await connection.sendTransaction(tx, { maxRetries: 3 });
+    console.log(`  Signature: ${signature}`);
+    await connection.confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight },
+      "confirmed",
+    );
+    console.log("  Confirmed!");
+    console.log();
+    console.log(`Explorer: https://solscan.io/tx/${signature}`);
   }
-
-  // 7. Build and sign versioned transaction
-  const { blockhash } = await connection.getLatestBlockhash("confirmed");
-
-  const messageV0 = new TransactionMessage({
-    payerKey: user,
-    recentBlockhash: blockhash,
-    instructions: allInstructions,
-  }).compileToV0Message(lookupTables);
-
-  const tx = new VersionedTransaction(messageV0);
-  tx.sign([keypair]);
-
-  console.log("Sending transaction...");
-  const signature = await connection.sendTransaction(tx, {
-    skipPreflight: false,
-    maxRetries: 3,
-  });
-  console.log(`  Signature: ${signature}`);
-
-  // 8. Confirm
-  const confirmation = await connection.confirmTransaction(
-    {
-      signature,
-      blockhash,
-      lastValidBlockHeight: (await connection.getLatestBlockhash())
-        .lastValidBlockHeight,
-    },
-    "confirmed",
-  );
-
-  if (confirmation.value.err) {
-    console.error("Transaction failed:", confirmation.value.err);
-    process.exit(1);
-  }
-
-  console.log("  Confirmed!");
-  console.log();
-  console.log(`Explorer: https://solscan.io/tx/${signature}`);
 }
 
 main().catch((err) => {
