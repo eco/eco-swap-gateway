@@ -8,30 +8,12 @@ use crate::constants::SKIP_CALLDATA_PATCH;
 use crate::cpi;
 use crate::events::IntentCreated;
 use crate::instructions::SwapIntentError;
-use crate::state::{SwapState, SWAP_STATE_SEED};
-
-/// An optional EVM call included in the route template for transparency.
-/// Already embedded in `route_template`; not used in on-chain computation.
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct EvmCall {
-    pub target: [u8; 32],
-    pub data: Vec<u8>,
-}
+use crate::state::{RouteBuffer, SwapState, ROUTE_BUFFER_SEED, SWAP_STATE_SEED};
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct CreateIntentArgs {
     /// Destination chain ID.
     pub destination: u64,
-
-    /// ABI-encoded route template with placeholder amounts.
-    pub route_template: Vec<u8>,
-
-    /// Byte offset of `tokens[0].amount` in `route_template` (always patched).
-    pub tokens_amount_offset: u32,
-
-    /// Byte offset of transfer amount in `calls[0].data`.
-    /// Set to `u32::MAX` to skip patching (Case 3: DEX swap routes).
-    pub calldata_amount_offset: u32,
 
     /// Reward deadline on the source chain.
     pub reward_deadline: u64,
@@ -65,11 +47,6 @@ pub struct CreateIntentArgs {
 
     /// Whether to allow partial vault funding.
     pub allow_partial: bool,
-
-    /// Optional extra calls embedded in the route template (for off-chain transparency only).
-    /// Not used in on-chain computation — deserialized and discarded. Each entry adds to
-    /// instruction data size and deserialization compute cost. Keep minimal.
-    pub extra_calls: Vec<EvmCall>,
 }
 
 #[derive(Accounts)]
@@ -85,6 +62,17 @@ pub struct CloseAndCreateIntent<'info> {
         constraint = swap_state.user == user.key() @ SwapIntentError::InvalidUser,
     )]
     pub swap_state: Account<'info, SwapState>,
+
+    /// Route buffer PDA containing the ABI-encoded route template and patch offsets.
+    /// Written in a setup transaction via write_route_buffer, closed here after use.
+    #[account(
+        mut,
+        close = user,
+        seeds = [ROUTE_BUFFER_SEED, user.key().as_ref()],
+        bump,
+        constraint = route_buffer.user == user.key() @ SwapIntentError::InvalidUser,
+    )]
+    pub route_buffer: Account<'info, RouteBuffer>,
 
     #[account(
         constraint = output_token_account.key() == swap_state.output_token_account @ SwapIntentError::InvalidTokenAccount,
@@ -116,9 +104,6 @@ pub fn close_and_create<'info>(
 ) -> Result<()> {
     let CreateIntentArgs {
         destination,
-        mut route_template,
-        tokens_amount_offset,
-        calldata_amount_offset,
         reward_deadline,
         reward_creator,
         reward_prover,
@@ -130,8 +115,12 @@ pub fn close_and_create<'info>(
         source_decimals,
         destination_decimals,
         allow_partial,
-        extra_calls: _, // Already embedded in route_template
     } = args;
+
+    // Read route template and offsets from the buffer account
+    let mut route_template = ctx.accounts.route_buffer.route_data.clone();
+    let tokens_amount_offset = ctx.accounts.route_buffer.tokens_amount_offset;
+    let calldata_amount_offset = ctx.accounts.route_buffer.calldata_amount_offset;
 
     // 1. Validate scalar parameters
     require!(scalar_denom > 0, SwapIntentError::InvalidScalar);
@@ -158,7 +147,11 @@ pub fn close_and_create<'info>(
     require!(swap_output > 0, SwapIntentError::InsufficientSwapOutput);
 
     // 5. Resolve reward amount: 0 means use full swap_output.
-    let actual_reward = if reward_amount == 0 { swap_output } else { reward_amount };
+    let actual_reward = if reward_amount == 0 {
+        swap_output
+    } else {
+        reward_amount
+    };
     require!(
         actual_reward <= swap_output,
         SwapIntentError::RewardExceedsSwapOutput
@@ -268,7 +261,7 @@ pub fn close_and_create<'info>(
         fund_args,
     )?;
 
-    // 15. Emit event (swap_state close happens via Anchor constraint)
+    // 15. Emit event (swap_state + route_buffer close happens via Anchor constraints)
     emit!(IntentCreated::new(
         intent_hash,
         ctx.accounts.user.key(),

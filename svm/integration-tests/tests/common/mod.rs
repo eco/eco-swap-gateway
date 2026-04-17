@@ -47,7 +47,6 @@ impl Context {
         let mint = Keypair::new();
         let mint_pubkey = mint.pubkey();
 
-        // Create mint
         let rent = svm.get_sysvar::<Rent>();
         let create_mint_ix = solana_sdk::system_instruction::create_account(
             &mint_authority.pubkey(),
@@ -75,7 +74,6 @@ impl Context {
         );
         svm.send_transaction(tx).unwrap();
 
-        // Create user's ATA
         let create_ata_ix = create_associated_token_account(
             &mint_authority.pubkey(),
             &user.pubkey(),
@@ -138,6 +136,13 @@ impl Context {
         )
     }
 
+    pub fn route_buffer_pda(&self) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[b"route_buffer", self.user.pubkey().as_ref()],
+            &swap_intent::ID,
+        )
+    }
+
     pub fn account_exists(&self, pubkey: &Pubkey) -> bool {
         self.svm
             .get_account(pubkey)
@@ -145,7 +150,42 @@ impl Context {
             .unwrap_or(false)
     }
 
-    /// Build the `open` instruction.
+    // ── Instruction builders ───────────────────────────────────────────
+
+    pub fn write_route_buffer_ix(
+        &self,
+        route_template: Vec<u8>,
+        tokens_amount_offset: u32,
+        calldata_amount_offset: u32,
+    ) -> Instruction {
+        let (route_buffer, _) = self.route_buffer_pda();
+
+        let args = swap_intent::instructions::WriteRouteBufferArgs {
+            route_template,
+            tokens_amount_offset,
+            calldata_amount_offset,
+        };
+
+        let mut data = anchor_discriminator("write_route_buffer");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        Instruction::new_with_bytes(
+            swap_intent::ID,
+            &data,
+            vec![
+                AccountMeta::new(self.user.pubkey(), true),
+                AccountMeta::new(route_buffer, false),
+                AccountMeta::new_readonly(system_program::ID, false),
+            ],
+        )
+    }
+
+    /// Write a default 128-byte route buffer with standard offsets (32, 96).
+    pub fn write_default_route_buffer(&mut self) {
+        let ix = self.write_route_buffer_ix(vec![0u8; 128], 32, 96);
+        self.send(&[ix]).unwrap();
+    }
+
     pub fn open_ix(&self) -> Instruction {
         let (swap_state, _) = self.swap_state_pda();
         let data = anchor_discriminator("open");
@@ -162,7 +202,6 @@ impl Context {
         )
     }
 
-    /// Build the `cancel` instruction.
     pub fn cancel_ix(&self) -> Instruction {
         let (swap_state, _) = self.swap_state_pda();
         let data = anchor_discriminator("cancel");
@@ -177,9 +216,7 @@ impl Context {
         )
     }
 
-    /// Build the `close_and_create_intent` instruction.
-    ///
-    /// `pre_balance` is needed to compute the expected route_amount and vault PDA.
+    /// Build close_and_create_intent. Route template is read from the route buffer PDA.
     pub fn close_and_create_ix(
         &self,
         pre_balance: u64,
@@ -192,19 +229,21 @@ impl Context {
         reward_amount: u64,
     ) -> Instruction {
         let swap_output = post_balance - pre_balance;
-        let actual_reward = if reward_amount == 0 { swap_output } else { reward_amount };
+        let actual_reward = if reward_amount == 0 {
+            swap_output
+        } else {
+            reward_amount
+        };
         let net_amount = swap_output * scalar_num / scalar_denom - flat_fee;
-        let route_amount = convert_decimals(net_amount as u128, source_decimals, destination_decimals);
-        let destination: u64 = 1; // Ethereum mainnet
+        let route_amount =
+            convert_decimals(net_amount as u128, source_decimals, destination_decimals);
+        let destination: u64 = 1;
 
-        // Build route template: 128 bytes with known offsets for patching
-        // tokens_amount at offset 32, calldata_amount at offset 96
+        // Compute expected route hash (same template as written to buffer, but patched)
         let mut route_template = vec![0u8; 128];
-        // Patch expected amounts so we can compute the hash
         let amount_bytes = to_be_uint256(route_amount);
         route_template[32..64].copy_from_slice(&amount_bytes);
         route_template[96..128].copy_from_slice(&amount_bytes);
-
         let route_hash = keccak256(&route_template);
 
         let reward = portal::types::Reward {
@@ -222,52 +261,17 @@ impl Context {
 
         let (vault, _) = portal::state::vault_pda(&intent_hash);
         let vault_ata = get_associated_token_address(&vault, &self.mint);
-        let (swap_state, _) = self.swap_state_pda();
 
-        // Build args (before patching — program patches the template)
-        let unpatched_template = vec![0u8; 128];
-        // Leave zeros as placeholder — program will overwrite
-
-        let args = swap_intent::instructions::CreateIntentArgs {
-            destination,
-            route_template: unpatched_template,
-            tokens_amount_offset: 32,
-            calldata_amount_offset: 96,
-            reward_deadline: u64::MAX,
-            reward_creator: self.user.pubkey(),
-            reward_prover: reward.prover,
-            reward_token: self.mint,
+        self.build_close_ix(
+            vault,
+            vault_ata,
+            reward.prover,
             reward_amount,
             flat_fee,
             scalar_num,
             scalar_denom,
             source_decimals,
             destination_decimals,
-            allow_partial: false,
-            extra_calls: vec![],
-        };
-
-        let mut data = anchor_discriminator("close_and_create_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
-
-        Instruction::new_with_bytes(
-            swap_intent::ID,
-            &data,
-            vec![
-                AccountMeta::new(self.user.pubkey(), true),
-                AccountMeta::new(swap_state, false),
-                AccountMeta::new_readonly(self.user_ata(), false),
-                AccountMeta::new_readonly(portal::ID, false),
-                AccountMeta::new(vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
-                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-                AccountMeta::new_readonly(system_program::ID, false),
-                // remaining_accounts: from_ata, vault_ata, mint
-                AccountMeta::new(self.user_ata(), false),
-                AccountMeta::new(vault_ata, false),
-                AccountMeta::new_readonly(self.mint, false),
-            ],
         )
     }
 
@@ -284,17 +288,20 @@ impl Context {
         reward_amount: u64,
     ) -> Instruction {
         let swap_output = post_balance - pre_balance;
-        let actual_reward = if reward_amount == 0 { swap_output } else { reward_amount };
+        let actual_reward = if reward_amount == 0 {
+            swap_output
+        } else {
+            reward_amount
+        };
         let net_amount = swap_output * scalar_num / scalar_denom - flat_fee;
-        let route_amount = convert_decimals(net_amount as u128, source_decimals, destination_decimals);
+        let route_amount =
+            convert_decimals(net_amount as u128, source_decimals, destination_decimals);
         let destination: u64 = 1;
 
-        // Route template: only offset 32 is patched, bytes 96..128 are left as-is
-        let mut route_template = vec![0xABu8; 128]; // non-zero fill to prove calldata isn't touched
+        // Only offset 32 is patched, bytes 96..128 stay 0xAB
+        let mut route_template = vec![0xABu8; 128];
         let amount_bytes = to_be_uint256(route_amount);
         route_template[32..64].copy_from_slice(&amount_bytes);
-        // bytes 96..128 stay 0xAB (pre-encoded calldata, NOT patched)
-
         let route_hash = keccak256(&route_template);
 
         let reward = portal::types::Reward {
@@ -312,55 +319,21 @@ impl Context {
 
         let (vault, _) = portal::state::vault_pda(&intent_hash);
         let vault_ata = get_associated_token_address(&vault, &self.mint);
-        let (swap_state, _) = self.swap_state_pda();
 
-        // Unpatched template with 0xAB fill
-        let unpatched_template = vec![0xABu8; 128];
-
-        let args = swap_intent::instructions::CreateIntentArgs {
-            destination,
-            route_template: unpatched_template,
-            tokens_amount_offset: 32,
-            calldata_amount_offset: u32::MAX, // sentinel: skip calldata patch
-            reward_deadline: u64::MAX,
-            reward_creator: self.user.pubkey(),
-            reward_prover: reward.prover,
-            reward_token: self.mint,
+        self.build_close_ix(
+            vault,
+            vault_ata,
+            reward.prover,
             reward_amount,
             flat_fee,
             scalar_num,
             scalar_denom,
             source_decimals,
             destination_decimals,
-            allow_partial: false,
-            extra_calls: vec![],
-        };
-
-        let mut data = anchor_discriminator("close_and_create_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
-
-        Instruction::new_with_bytes(
-            swap_intent::ID,
-            &data,
-            vec![
-                AccountMeta::new(self.user.pubkey(), true),
-                AccountMeta::new(swap_state, false),
-                AccountMeta::new_readonly(self.user_ata(), false),
-                AccountMeta::new_readonly(portal::ID, false),
-                AccountMeta::new(vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
-                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-                AccountMeta::new_readonly(system_program::ID, false),
-                AccountMeta::new(self.user_ata(), false),
-                AccountMeta::new(vault_ata, false),
-                AccountMeta::new_readonly(self.mint, false),
-            ],
         )
     }
 
-    /// Build close_and_create_intent for error cases where we expect early failure
-    /// (before vault PDA validation). Uses a dummy vault since the tx will revert.
+    /// Build close_and_create_intent for error cases (dummy vault, will revert before validation).
     pub fn close_and_create_ix_error_case(
         &self,
         flat_fee: u64,
@@ -369,68 +342,34 @@ impl Context {
         source_decimals: u8,
         destination_decimals: u8,
     ) -> Instruction {
-        let (swap_state, _) = self.swap_state_pda();
         let dummy_vault = Pubkey::new_unique();
         let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
 
-        let args = swap_intent::instructions::CreateIntentArgs {
-            destination: 1,
-            route_template: vec![0u8; 128],
-            tokens_amount_offset: 32,
-            calldata_amount_offset: 96,
-            reward_deadline: u64::MAX,
-            reward_creator: self.user.pubkey(),
-            reward_prover: Pubkey::new_unique(),
-            reward_token: self.mint,
-            reward_amount: 0,
+        self.build_close_ix(
+            dummy_vault,
+            vault_ata,
+            Pubkey::new_unique(),
+            0,
             flat_fee,
             scalar_num,
             scalar_denom,
             source_decimals,
             destination_decimals,
-            allow_partial: false,
-            extra_calls: vec![],
-        };
-
-        let mut data = anchor_discriminator("close_and_create_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
-
-        Instruction::new_with_bytes(
-            swap_intent::ID,
-            &data,
-            vec![
-                AccountMeta::new(self.user.pubkey(), true),
-                AccountMeta::new(swap_state, false),
-                AccountMeta::new_readonly(self.user_ata(), false),
-                AccountMeta::new_readonly(portal::ID, false),
-                AccountMeta::new(dummy_vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
-                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-                AccountMeta::new_readonly(system_program::ID, false),
-                AccountMeta::new(self.user_ata(), false),
-                AccountMeta::new(vault_ata, false),
-                AccountMeta::new_readonly(self.mint, false),
-            ],
         )
     }
 
-    /// Build close_and_create_intent with a wrong reward_token (mismatched mint).
     pub fn close_and_create_ix_wrong_reward_token(&self) -> Instruction {
-        let (swap_state, _) = self.swap_state_pda();
         let dummy_vault = Pubkey::new_unique();
         let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
-        let wrong_token = Pubkey::new_unique();
+        let (swap_state, _) = self.swap_state_pda();
+        let (route_buffer, _) = self.route_buffer_pda();
 
         let args = swap_intent::instructions::CreateIntentArgs {
             destination: 1,
-            route_template: vec![0u8; 128],
-            tokens_amount_offset: 32,
-            calldata_amount_offset: 96,
             reward_deadline: u64::MAX,
             reward_creator: self.user.pubkey(),
             reward_prover: Pubkey::new_unique(),
-            reward_token: wrong_token, // deliberately wrong
+            reward_token: Pubkey::new_unique(), // deliberately wrong
             reward_amount: 0,
             flat_fee: 0,
             scalar_num: 1,
@@ -438,7 +377,6 @@ impl Context {
             source_decimals: 6,
             destination_decimals: 6,
             allow_partial: false,
-            extra_calls: vec![],
         };
 
         let mut data = anchor_discriminator("close_and_create_intent");
@@ -447,34 +385,18 @@ impl Context {
         Instruction::new_with_bytes(
             swap_intent::ID,
             &data,
-            vec![
-                AccountMeta::new(self.user.pubkey(), true),
-                AccountMeta::new(swap_state, false),
-                AccountMeta::new_readonly(self.user_ata(), false),
-                AccountMeta::new_readonly(portal::ID, false),
-                AccountMeta::new(dummy_vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
-                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-                AccountMeta::new_readonly(system_program::ID, false),
-                AccountMeta::new(self.user_ata(), false),
-                AccountMeta::new(vault_ata, false),
-                AccountMeta::new_readonly(self.mint, false),
-            ],
+            self.close_accounts(swap_state, route_buffer, dummy_vault, vault_ata),
         )
     }
 
-    /// Build close_and_create_intent with a wrong output_token_account (different from open).
     pub fn close_and_create_ix_wrong_token_account(&self, wrong_ata: Pubkey) -> Instruction {
-        let (swap_state, _) = self.swap_state_pda();
         let dummy_vault = Pubkey::new_unique();
         let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
+        let (swap_state, _) = self.swap_state_pda();
+        let (route_buffer, _) = self.route_buffer_pda();
 
         let args = swap_intent::instructions::CreateIntentArgs {
             destination: 1,
-            route_template: vec![0u8; 128],
-            tokens_amount_offset: 32,
-            calldata_amount_offset: 96,
             reward_deadline: u64::MAX,
             reward_creator: self.user.pubkey(),
             reward_prover: Pubkey::new_unique(),
@@ -486,84 +408,35 @@ impl Context {
             source_decimals: 6,
             destination_decimals: 6,
             allow_partial: false,
-            extra_calls: vec![],
         };
 
         let mut data = anchor_discriminator("close_and_create_intent");
         data.extend_from_slice(&args.try_to_vec().unwrap());
 
-        Instruction::new_with_bytes(
-            swap_intent::ID,
-            &data,
-            vec![
-                AccountMeta::new(self.user.pubkey(), true),
-                AccountMeta::new(swap_state, false),
-                AccountMeta::new_readonly(wrong_ata, false), // wrong token account
-                AccountMeta::new_readonly(portal::ID, false),
-                AccountMeta::new(dummy_vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
-                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-                AccountMeta::new_readonly(system_program::ID, false),
-                AccountMeta::new(self.user_ata(), false),
-                AccountMeta::new(vault_ata, false),
-                AccountMeta::new_readonly(self.mint, false),
-            ],
-        )
+        // Override the output_token_account with wrong_ata
+        let mut accounts = self.close_accounts(swap_state, route_buffer, dummy_vault, vault_ata);
+        accounts[3] = AccountMeta::new_readonly(wrong_ata, false); // position of output_token_account
+        Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
     }
 
-    /// Build close_and_create_intent with a custom reward_amount for error testing.
-    /// Uses a dummy vault since the tx will revert before vault validation.
     pub fn close_and_create_ix_error_case_with_reward(&self, reward_amount: u64) -> Instruction {
-        let (swap_state, _) = self.swap_state_pda();
         let dummy_vault = Pubkey::new_unique();
         let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
 
-        let args = swap_intent::instructions::CreateIntentArgs {
-            destination: 1,
-            route_template: vec![0u8; 128],
-            tokens_amount_offset: 32,
-            calldata_amount_offset: 96,
-            reward_deadline: u64::MAX,
-            reward_creator: self.user.pubkey(),
-            reward_prover: Pubkey::new_unique(),
-            reward_token: self.mint,
+        self.build_close_ix(
+            dummy_vault,
+            vault_ata,
+            Pubkey::new_unique(),
             reward_amount,
-            flat_fee: 0,
-            scalar_num: 1,
-            scalar_denom: 1,
-            source_decimals: 6,
-            destination_decimals: 6,
-            allow_partial: false,
-            extra_calls: vec![],
-        };
-
-        let mut data = anchor_discriminator("close_and_create_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
-
-        Instruction::new_with_bytes(
-            swap_intent::ID,
-            &data,
-            vec![
-                AccountMeta::new(self.user.pubkey(), true),
-                AccountMeta::new(swap_state, false),
-                AccountMeta::new_readonly(self.user_ata(), false),
-                AccountMeta::new_readonly(portal::ID, false),
-                AccountMeta::new(dummy_vault, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-                AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
-                AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-                AccountMeta::new_readonly(system_program::ID, false),
-                AccountMeta::new(self.user_ata(), false),
-                AccountMeta::new(vault_ata, false),
-                AccountMeta::new_readonly(self.mint, false),
-            ],
+            0,
+            1,
+            1,
+            6,
+            6,
         )
     }
 
-    /// Build a cancel instruction for a different user (attacker).
     pub fn cancel_ix_wrong_user(&self, attacker: &Keypair) -> Instruction {
-        // Derive PDA from the real user (not the attacker) — attacker tries to close it
         let (swap_state, _) = self.swap_state_pda();
         let data = anchor_discriminator("cancel");
 
@@ -577,7 +450,6 @@ impl Context {
         )
     }
 
-    /// Send a transaction signed by a specific keypair (not the default user).
     pub fn send_as(&mut self, signer: &Keypair, ixs: &[Instruction]) -> TransactionResult {
         let mut all_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(
             COMPUTE_UNIT_LIMIT,
@@ -608,6 +480,73 @@ impl Context {
         let result = self.svm.send_transaction(tx);
         self.svm.expire_blockhash();
         result.map_err(Box::new)
+    }
+
+    // ── Private helpers ────────────────────────────────────────────────
+
+    fn build_close_ix(
+        &self,
+        vault: Pubkey,
+        vault_ata: Pubkey,
+        reward_prover: Pubkey,
+        reward_amount: u64,
+        flat_fee: u64,
+        scalar_num: u64,
+        scalar_denom: u64,
+        source_decimals: u8,
+        destination_decimals: u8,
+    ) -> Instruction {
+        let (swap_state, _) = self.swap_state_pda();
+        let (route_buffer, _) = self.route_buffer_pda();
+
+        let args = swap_intent::instructions::CreateIntentArgs {
+            destination: 1,
+            reward_deadline: u64::MAX,
+            reward_creator: self.user.pubkey(),
+            reward_prover,
+            reward_token: self.mint,
+            reward_amount,
+            flat_fee,
+            scalar_num,
+            scalar_denom,
+            source_decimals,
+            destination_decimals,
+            allow_partial: false,
+        };
+
+        let mut data = anchor_discriminator("close_and_create_intent");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        Instruction::new_with_bytes(
+            swap_intent::ID,
+            &data,
+            self.close_accounts(swap_state, route_buffer, vault, vault_ata),
+        )
+    }
+
+    fn close_accounts(
+        &self,
+        swap_state: Pubkey,
+        route_buffer: Pubkey,
+        vault: Pubkey,
+        vault_ata: Pubkey,
+    ) -> Vec<AccountMeta> {
+        vec![
+            AccountMeta::new(self.user.pubkey(), true),
+            AccountMeta::new(swap_state, false),
+            AccountMeta::new(route_buffer, false),
+            AccountMeta::new_readonly(self.user_ata(), false),
+            AccountMeta::new_readonly(portal::ID, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
+            AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+            // remaining_accounts: from_ata, vault_ata, mint
+            AccountMeta::new(self.user_ata(), false),
+            AccountMeta::new(vault_ata, false),
+            AccountMeta::new_readonly(self.mint, false),
+        ]
     }
 }
 

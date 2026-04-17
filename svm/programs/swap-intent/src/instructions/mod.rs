@@ -3,10 +3,12 @@ use anchor_lang::prelude::*;
 mod cancel;
 mod close_and_create;
 mod open;
+mod write_route_buffer;
 
 pub use cancel::*;
 pub use close_and_create::*;
 pub use open::*;
+pub use write_route_buffer::*;
 
 #[error_code]
 pub enum SwapIntentError {

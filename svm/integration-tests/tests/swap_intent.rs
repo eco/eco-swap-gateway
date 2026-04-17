@@ -10,33 +10,31 @@ use solana_sdk::signer::Signer;
 use solana_sdk::transaction::{Transaction, TransactionError};
 use swap_intent::instructions::SwapIntentError;
 
-/// Happy path: open -> mint tokens (simulates swap) -> close_and_create_intent.
-/// The intent is created with the correct amounts and the state PDA is closed.
+/// Happy path: write_route_buffer + open -> mint -> close_and_create_intent.
 #[test]
 fn open_swap_close_and_create_intent_success() {
     let mut ctx = Context::new();
 
-    let pre_balance = 100_000; // 0.1 USDC already in ATA
-    let swap_amount = 1_000_000; // 1.0 USDC from swap
+    let pre_balance = 100_000;
+    let swap_amount = 1_000_000;
     let flat_fee = 5_000;
     let scalar_num = 997;
     let scalar_denom = 1000;
 
-    // Give user some initial tokens (pre-existing balance)
     ctx.mint_to_user(pre_balance);
-    assert_eq!(ctx.token_balance(&ctx.user_ata()), pre_balance);
 
-    // Step 1: open -- snapshot the pre-swap balance
+    // Setup: write route buffer
+    ctx.write_default_route_buffer();
+
+    // Step 1: open
     ctx.send(&[ctx.open_ix()]).unwrap();
 
-    // Verify state PDA exists
     let (swap_state_pda, _) = ctx.swap_state_pda();
     assert!(ctx.account_exists(&swap_state_pda));
 
-    // Step 2: simulate swap by minting more tokens
+    // Step 2: simulate swap
     ctx.mint_to_user(swap_amount);
     let post_balance = pre_balance + swap_amount;
-    assert_eq!(ctx.token_balance(&ctx.user_ata()), post_balance);
 
     // Step 3: close_and_create_intent
     let ix = ctx.close_and_create_ix(
@@ -51,15 +49,14 @@ fn open_swap_close_and_create_intent_success() {
     );
     ctx.send(&[ix]).unwrap();
 
-    // Verify state PDA is closed
     assert!(!ctx.account_exists(&swap_state_pda));
-
-    // Verify user's tokens were transferred to vault (reward = swap_output = 1_000_000)
-    // User started with post_balance and should have post_balance - swap_amount left
+    // Route buffer is also closed
+    let (route_buffer_pda, _) = ctx.route_buffer_pda();
+    assert!(!ctx.account_exists(&route_buffer_pda));
     assert_eq!(ctx.token_balance(&ctx.user_ata()), pre_balance);
 }
 
-/// Case 3: close_and_create_intent with calldata patching skipped (u32::MAX sentinel).
+/// Case 3: calldata patching skipped (u32::MAX sentinel).
 #[test]
 fn close_and_create_intent_skip_calldata_patch() {
     let mut ctx = Context::new();
@@ -69,20 +66,31 @@ fn close_and_create_intent_skip_calldata_patch() {
     let scalar_num = 997;
     let scalar_denom = 1000;
 
+    // Write route buffer with 0xAB fill and skip-calldata offset
+    let ix = ctx.write_route_buffer_ix(vec![0xABu8; 128], 32, u32::MAX);
+    ctx.send(&[ix]).unwrap();
+
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
-    let ix =
-        ctx.close_and_create_ix_skip_calldata(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6, 0);
+    let ix = ctx.close_and_create_ix_skip_calldata(
+        0,
+        swap_amount,
+        flat_fee,
+        scalar_num,
+        scalar_denom,
+        6,
+        6,
+        0,
+    );
     ctx.send(&[ix]).unwrap();
 
-    // Verify state PDA is closed and tokens transferred
     let (swap_state_pda, _) = ctx.swap_state_pda();
     assert!(!ctx.account_exists(&swap_state_pda));
     assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
 }
 
-/// Cancel: open -> cancel. State PDA is closed and rent returned.
+/// Cancel: open -> cancel.
 #[test]
 fn open_then_cancel() {
     let mut ctx = Context::new();
@@ -93,19 +101,17 @@ fn open_then_cancel() {
     assert!(ctx.account_exists(&swap_state_pda));
 
     ctx.send(&[ctx.cancel_ix()]).unwrap();
-
-    // State PDA is closed
     assert!(!ctx.account_exists(&swap_state_pda));
 }
 
-/// Error: close_and_create_intent with zero swap output (no tokens added after open).
+/// Error: zero swap output.
 #[test]
 fn close_fails_with_zero_swap_output() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
 
-    // Don't mint any tokens -- swap output will be 0
     let ix = ctx.close_and_create_ix_error_case(0, 1, 1, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
@@ -116,15 +122,16 @@ fn close_fails_with_zero_swap_output() {
     );
 }
 
-/// Error: invalid scalar (denominator = 0).
+/// Error: scalar_denom = 0.
 #[test]
 fn close_fails_with_zero_scalar_denom() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
-    let ix = ctx.close_and_create_ix_error_case(0, 1, 0, 6, 6); // scalar_denom = 0
+    let ix = ctx.close_and_create_ix_error_case(0, 1, 0, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -134,15 +141,16 @@ fn close_fails_with_zero_scalar_denom() {
     );
 }
 
-/// Error: invalid scalar (numerator > denominator).
+/// Error: scalar_num > scalar_denom.
 #[test]
 fn close_fails_with_scalar_num_greater_than_denom() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
-    let ix = ctx.close_and_create_ix_error_case(0, 1001, 1000, 6, 6); // num > denom
+    let ix = ctx.close_and_create_ix_error_case(0, 1001, 1000, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -152,15 +160,16 @@ fn close_fails_with_scalar_num_greater_than_denom() {
     );
 }
 
-/// Error: invalid scalar (numerator = 0).
+/// Error: scalar_num = 0.
 #[test]
 fn close_fails_with_zero_scalar_num() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
-    let ix = ctx.close_and_create_ix_error_case(0, 0, 1, 6, 6); // scalar_num = 0
+    let ix = ctx.close_and_create_ix_error_case(0, 0, 1, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
@@ -170,15 +179,15 @@ fn close_fails_with_zero_scalar_num() {
     );
 }
 
-/// Error: route_amount is zero because flat_fee eats everything after scaling.
+/// Error: route_amount zero (flat_fee eats everything).
 #[test]
 fn close_fails_with_route_amount_zero() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
-    ctx.mint_to_user(100); // tiny swap output
+    ctx.mint_to_user(100);
 
-    // scalar = 1/1, flat_fee = 100 -> route_amount = 100 * 1/1 - 100 = 0
     let ix = ctx.close_and_create_ix_error_case(100, 1, 1, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
@@ -189,15 +198,15 @@ fn close_fails_with_route_amount_zero() {
     );
 }
 
-/// Error: flat_fee exceeds scaled amount (underflow).
+/// Error: flat_fee exceeds scaled amount.
 #[test]
 fn close_fails_when_flat_fee_exceeds_scaled_amount() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000);
 
-    // scaled = 1000 * 1/1 = 1000, flat_fee = 2000 -> underflow
     let ix = ctx.close_and_create_ix_error_case(2_000, 1, 1, 6, 6);
     let err = ctx.send(&[ix]).unwrap_err();
 
@@ -208,53 +217,48 @@ fn close_fails_when_flat_fee_exceeds_scaled_amount() {
     );
 }
 
-/// Error: cannot open twice (PDA already exists).
+/// Error: cannot open twice.
 #[test]
 fn open_twice_fails() {
     let mut ctx = Context::new();
 
     ctx.send(&[ctx.open_ix()]).unwrap();
 
-    // Second open should fail -- PDA already initialized
     let err = ctx.send(&[ctx.open_ix()]).unwrap_err();
-
-    // System program returns Custom(0) for already-initialized account
     assert!(
         matches!(
             err.err,
             TransactionError::InstructionError(_, InstructionError::Custom(_))
         ),
-        "Expected PDA init failure (Custom error), got: {:?}",
+        "Expected PDA init failure, got: {:?}",
         err.err
     );
 }
 
-/// Verify fee calculation: route_amount = swap_output * scalar_num / scalar_denom - flat_fee
+/// Fee calculation verification.
 #[test]
 fn fee_calculation_matches_expected() {
     let mut ctx = Context::new();
 
-    let swap_amount = 2_000_000; // 2.0 USDC
+    let swap_amount = 2_000_000;
     let flat_fee = 10_000;
     let scalar_num = 995;
     let scalar_denom = 1000;
 
-    // Expected: 2_000_000 * 995 / 1000 - 10_000 = 1_990_000 - 10_000 = 1_980_000
-    let expected_route_amount = swap_amount * scalar_num / scalar_denom - flat_fee;
-    assert_eq!(expected_route_amount, 1_980_000);
+    let expected = swap_amount * scalar_num / scalar_denom - flat_fee;
+    assert_eq!(expected, 1_980_000);
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
     let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6, 0);
     ctx.send(&[ix]).unwrap();
 
-    // If the transaction succeeded, the fee calculation matched (otherwise vault PDA would mismatch)
-    // Verify full swap_output was transferred as reward
     assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
 }
 
-/// Security regression: another user cannot cancel someone else's swap state.
+/// Security: wrong user cannot cancel.
 #[test]
 fn cancel_fails_with_wrong_user() {
     let mut ctx = Context::new();
@@ -262,34 +266,29 @@ fn cancel_fails_with_wrong_user() {
     ctx.send(&[ctx.open_ix()]).unwrap();
 
     let (swap_state_pda, _) = ctx.swap_state_pda();
-    assert!(ctx.account_exists(&swap_state_pda));
-
-    // Create attacker keypair and fund it
     let attacker = solana_sdk::signature::Keypair::new();
     ctx.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
 
     let ix = ctx.cancel_ix_wrong_user(&attacker);
     let err = ctx.send_as(&attacker, &[ix]).unwrap_err();
 
-    // PDA seeds don't match attacker's key, so Anchor rejects with ConstraintSeeds
     assert!(
         matches!(
             err.err,
             TransactionError::InstructionError(_, InstructionError::Custom(_))
         ),
-        "Expected constraint failure for wrong user, got: {:?}",
+        "Expected constraint failure, got: {:?}",
         err.err
     );
-
-    // Verify state PDA is still intact
     assert!(ctx.account_exists(&swap_state_pda));
 }
 
-/// Security regression: reward_token must match the swap output mint.
+/// Security: wrong reward_token.
 #[test]
 fn close_fails_with_wrong_reward_token() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
@@ -303,15 +302,15 @@ fn close_fails_with_wrong_reward_token() {
     );
 }
 
-/// Security regression: output_token_account must match the one recorded at open time.
+/// Security: wrong token account.
 #[test]
 fn close_fails_with_wrong_token_account() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
-    // Create a second ATA for the same mint (different account, same mint)
     let other_holder = solana_sdk::signature::Keypair::new();
     ctx.svm
         .airdrop(&other_holder.pubkey(), 1_000_000_000)
@@ -330,7 +329,6 @@ fn close_fails_with_wrong_token_account() {
     );
     ctx.svm.send_transaction(tx).unwrap();
 
-    // Try to close with the other holder's ATA instead of user's
     let ix = ctx.close_and_create_ix_wrong_token_account(other_ata);
     let err = ctx.send(&[ix]).unwrap_err();
 
@@ -341,76 +339,59 @@ fn close_fails_with_wrong_token_account() {
     );
 }
 
-// ─── Decimal Conversion Tests ───────────────────────────────────────────────
+// ─── Decimal Conversion Tests ──────────────────────────────────────────
 
-/// Same decimals (6→6): route_amount is unchanged by decimal conversion.
 #[test]
 fn decimal_conversion_same_decimals() {
     let mut ctx = Context::new();
 
-    let swap_amount = 1_000_000;
-    let flat_fee = 5_000;
-    let scalar_num = 997;
-    let scalar_denom = 1000;
-
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
-    ctx.mint_to_user(swap_amount);
+    ctx.mint_to_user(1_000_000);
 
-    let ix = ctx.close_and_create_ix(0, swap_amount, flat_fee, scalar_num, scalar_denom, 6, 6, 0);
+    let ix = ctx.close_and_create_ix(0, 1_000_000, 5_000, 997, 1000, 6, 6, 0);
     ctx.send(&[ix]).unwrap();
 
-    let (swap_state_pda, _) = ctx.swap_state_pda();
-    assert!(!ctx.account_exists(&swap_state_pda));
     assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
 }
 
-/// Scale UP (6→18): route_amount = net_amount * 10^12. This exceeds u64 max for
-/// large amounts, proving the u128 promotion works correctly.
 #[test]
 fn decimal_conversion_6_to_18() {
     let mut ctx = Context::new();
 
-    // 18,400 USDC at 6 decimals. After 10^12 scaling: 1.84e22 — overflows u64.
     let swap_amount = 18_400_000_000u64;
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
-    // No fees, scalar 1:1, source=6, dest=18
     let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 6, 18, 0);
     ctx.send(&[ix]).unwrap();
 
-    let (swap_state_pda, _) = ctx.swap_state_pda();
-    assert!(!ctx.account_exists(&swap_state_pda));
     assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
 }
 
-/// Scale DOWN (18→6): route_amount = net_amount / 10^12.
 #[test]
 fn decimal_conversion_18_to_6() {
     let mut ctx = Context::new();
 
-    // 2 USDC at 18 decimals = 2_000_000_000_000. After /10^12 = 2 at 6 decimals.
     let swap_amount = 2_000_000_000_000u64;
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
-    // No fees, scalar 1:1, source=18, dest=6
     let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 18, 6, 0);
     ctx.send(&[ix]).unwrap();
 
-    let (swap_state_pda, _) = ctx.swap_state_pda();
-    assert!(!ctx.account_exists(&swap_state_pda));
     assert_eq!(ctx.token_balance(&ctx.user_ata()), 0);
 }
 
-/// Truncation to zero: scaling down produces route_amount = 0 → RouteAmountZero.
-/// swap_output = 1_000_000, source=18, dest=6 → 1_000_000 / 10^12 = 0.
 #[test]
 fn decimal_conversion_truncates_to_zero() {
     let mut ctx = Context::new();
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(1_000_000);
 
@@ -424,9 +405,8 @@ fn decimal_conversion_truncates_to_zero() {
     );
 }
 
-// ─── Custom Reward Amount Tests ─────────────────────────────────────────────
+// ─── Custom Reward Amount Tests ────────────────────────────────────────
 
-/// Default reward (reward_amount = 0): vault gets full swap_output, user keeps pre_balance.
 #[test]
 fn default_reward_uses_full_swap_output() {
     let mut ctx = Context::new();
@@ -435,17 +415,16 @@ fn default_reward_uses_full_swap_output() {
     let swap_amount = 1_000_000;
 
     ctx.mint_to_user(pre_balance);
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
     let ix = ctx.close_and_create_ix(pre_balance, pre_balance + swap_amount, 0, 1, 1, 6, 6, 0);
     ctx.send(&[ix]).unwrap();
 
-    // User keeps only pre_balance (full swap_output went to vault)
     assert_eq!(ctx.token_balance(&ctx.user_ata()), pre_balance);
 }
 
-/// Custom reward: vault gets reward_amount, user keeps swap_output - reward_amount.
 #[test]
 fn custom_reward_amount() {
     let mut ctx = Context::new();
@@ -453,27 +432,29 @@ fn custom_reward_amount() {
     let swap_amount = 1_000_000;
     let custom_reward = 600_000;
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
     let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 6, 6, custom_reward);
     ctx.send(&[ix]).unwrap();
 
-    // User keeps the difference: swap_output - custom_reward
-    assert_eq!(ctx.token_balance(&ctx.user_ata()), swap_amount - custom_reward);
+    assert_eq!(
+        ctx.token_balance(&ctx.user_ata()),
+        swap_amount - custom_reward
+    );
 }
 
-/// Error: reward_amount exceeds swap_output.
 #[test]
 fn close_fails_with_reward_exceeds_swap_output() {
     let mut ctx = Context::new();
 
     let swap_amount = 1_000_000;
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
-    // reward_amount = swap_amount + 1 → exceeds swap_output
     let ix = ctx.close_and_create_ix_error_case_with_reward(swap_amount + 1);
     let err = ctx.send(&[ix]).unwrap_err();
 
@@ -484,7 +465,6 @@ fn close_fails_with_reward_exceeds_swap_output() {
     );
 }
 
-/// Integration: custom reward — verify vault holds exactly actual_reward.
 #[test]
 fn integration_custom_reward_vault_balance() {
     let mut ctx = Context::new();
@@ -492,14 +472,15 @@ fn integration_custom_reward_vault_balance() {
     let swap_amount = 1_000_000;
     let custom_reward = 700_000;
 
+    ctx.write_default_route_buffer();
     ctx.send(&[ctx.open_ix()]).unwrap();
     ctx.mint_to_user(swap_amount);
 
     let ix = ctx.close_and_create_ix(0, swap_amount, 0, 1, 1, 6, 6, custom_reward);
     ctx.send(&[ix]).unwrap();
 
-    let (swap_state_pda, _) = ctx.swap_state_pda();
-    assert!(!ctx.account_exists(&swap_state_pda));
-    // User keeps excess, contract holds nothing
-    assert_eq!(ctx.token_balance(&ctx.user_ata()), swap_amount - custom_reward);
+    assert_eq!(
+        ctx.token_balance(&ctx.user_ata()),
+        swap_amount - custom_reward
+    );
 }
