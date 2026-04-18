@@ -1063,6 +1063,7 @@ dependencies = [
  "anchor-lang",
  "derive-new",
  "derive_more",
+ "goldie",
 ]
 
 [[package]]
@@ -2150,6 +2151,7 @@ dependencies = [
  "anchor-spl",
  "derive-new",
  "eco-svm-std",
+ "goldie",
  "itertools 0.14.0",
  "tiny-keccak",
 ]

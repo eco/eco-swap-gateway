@@ -18,7 +18,7 @@ use solana_sdk::transaction::{Transaction, TransactionError};
 use tiny_keccak::{Hasher, Keccak};
 
 const COMPUTE_UNIT_LIMIT: u32 = 400_000;
-const PORTAL_BIN: &[u8] = include_bytes!("../../../../../eco-routes-svm/target/deploy/portal.so");
+const PORTAL_BIN: &[u8] = include_bytes!("../../../eco-routes-svm/target/deploy/portal.so");
 const INTENT_PUBLISHER_BIN: &[u8] = include_bytes!("../../../target/deploy/intent_publisher.so");
 
 type TransactionResult = Result<TransactionMetadata, Box<FailedTransactionMetadata>>;

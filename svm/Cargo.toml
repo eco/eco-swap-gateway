@@ -6,9 +6,9 @@ resolver = "2"
 anchor-lang = "0.31.1"
 anchor-spl = "0.31.1"
 derive-new = "0.7.0"
-eco-svm-std = { path = "../../eco-routes-svm/packages/eco-svm-std" }
+eco-svm-std = { path = "eco-routes-svm/packages/eco-svm-std" }
 goldie = "0.5.0"
-portal = { path = "../../eco-routes-svm/programs/portal", features = ["no-entrypoint"] }
+portal = { path = "eco-routes-svm/programs/portal", features = ["no-entrypoint"] }
 intent-publisher = { path = "programs/intent-publisher" }
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 
