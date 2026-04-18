@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("SwapXCqJ3cwYZVUinbG6zxJYLgX4joT9KqvGqetnj5d");
+declare_id!("SwapWWXTxvb4xseWzDBsE6yqsCmBPAigMJE6qifAttC");
 
 pub mod constants;
 pub mod cpi;
@@ -21,19 +21,18 @@ pub mod swap_intent {
         instructions::write_route_buffer(ctx, args)
     }
 
-    pub fn open(ctx: Context<Open>) -> Result<()> {
-        open_swap(ctx)
-    }
-
-    pub fn close_and_create_intent<'info>(
-        ctx: Context<'_, '_, '_, 'info, CloseAndCreateIntent<'info>>,
+    pub fn create_intent<'info>(
+        ctx: Context<'_, '_, '_, 'info, CreateIntent<'info>>,
         args: CreateIntentArgs,
     ) -> Result<()> {
-        close_and_create(ctx, args)
+        instructions::create_intent(ctx, args)
     }
 
-    pub fn cancel(ctx: Context<Cancel>) -> Result<()> {
-        cancel_swap(ctx)
+    pub fn create_intent_from_buffer<'info>(
+        ctx: Context<'_, '_, '_, 'info, CreateIntentFromBuffer<'info>>,
+        args: CreateIntentFromBufferArgs,
+    ) -> Result<()> {
+        instructions::create_intent_from_buffer(ctx, args)
     }
 
     pub fn close_route_buffer(ctx: Context<CloseRouteBuffer>) -> Result<()> {

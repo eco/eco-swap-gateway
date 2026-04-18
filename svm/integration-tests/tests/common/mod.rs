@@ -129,13 +129,6 @@ impl Context {
             .unwrap_or(0)
     }
 
-    pub fn swap_state_pda(&self) -> (Pubkey, u8) {
-        Pubkey::find_program_address(
-            &[b"swap_state", self.user.pubkey().as_ref()],
-            &swap_intent::ID,
-        )
-    }
-
     pub fn route_buffer_pda(&self) -> (Pubkey, u8) {
         Pubkey::find_program_address(
             &[b"route_buffer", self.user.pubkey().as_ref()],
@@ -152,19 +145,9 @@ impl Context {
 
     // ── Instruction builders ───────────────────────────────────────────
 
-    pub fn write_route_buffer_ix(
-        &self,
-        route_template: Vec<u8>,
-        tokens_amount_offset: u32,
-        calldata_amount_offset: u32,
-    ) -> Instruction {
+    pub fn write_route_buffer_ix(&self, route: Vec<u8>) -> Instruction {
         let (route_buffer, _) = self.route_buffer_pda();
-
-        let args = swap_intent::instructions::WriteRouteBufferArgs {
-            route_template,
-            tokens_amount_offset,
-            calldata_amount_offset,
-        };
+        let args = swap_intent::instructions::WriteRouteBufferArgs { route };
 
         let mut data = anchor_discriminator("write_route_buffer");
         data.extend_from_slice(&args.try_to_vec().unwrap());
@@ -180,274 +163,223 @@ impl Context {
         )
     }
 
-    /// Write a default 128-byte route buffer with standard offsets (32, 96).
     pub fn write_default_route_buffer(&mut self) {
-        let ix = self.write_route_buffer_ix(vec![0u8; 128], 32, 96);
+        let ix = self.write_route_buffer_ix(vec![0u8; 128]);
         self.send(&[ix]).unwrap();
     }
 
-    pub fn open_ix(&self) -> Instruction {
-        let (swap_state, _) = self.swap_state_pda();
-        let data = anchor_discriminator("open");
+    pub fn close_route_buffer_ix(&self) -> Instruction {
+        let (route_buffer, _) = self.route_buffer_pda();
+        let data = anchor_discriminator("close_route_buffer");
 
         Instruction::new_with_bytes(
             swap_intent::ID,
             &data,
             vec![
                 AccountMeta::new(self.user.pubkey(), true),
-                AccountMeta::new_readonly(self.user_ata(), false),
-                AccountMeta::new(swap_state, false),
-                AccountMeta::new_readonly(system_program::ID, false),
+                AccountMeta::new(route_buffer, false),
             ],
         )
     }
 
-    pub fn cancel_ix(&self) -> Instruction {
-        let (swap_state, _) = self.swap_state_pda();
-        let data = anchor_discriminator("cancel");
+    pub fn close_route_buffer_ix_as(&self, attacker: &Pubkey) -> Instruction {
+        let (route_buffer, _) = self.route_buffer_pda();
+        let data = anchor_discriminator("close_route_buffer");
 
         Instruction::new_with_bytes(
             swap_intent::ID,
             &data,
             vec![
-                AccountMeta::new(self.user.pubkey(), true),
-                AccountMeta::new(swap_state, false),
+                AccountMeta::new(*attacker, true),
+                AccountMeta::new(route_buffer, false),
             ],
         )
     }
 
-    /// Build close_and_create_intent. Route template is read from the route buffer PDA.
-    pub fn close_and_create_ix(
-        &self,
-        pre_balance: u64,
-        post_balance: u64,
-        flat_fee: u64,
-        scalar_num: u64,
-        scalar_denom: u64,
-        source_decimals: u8,
-        destination_decimals: u8,
-        reward_amount: u64,
-    ) -> Instruction {
-        let swap_output = post_balance - pre_balance;
-        let actual_reward = if reward_amount == 0 {
-            swap_output
-        } else {
-            reward_amount
-        };
-        let net_amount = swap_output * scalar_num / scalar_denom - flat_fee;
-        let route_amount =
-            convert_decimals(net_amount as u128, source_decimals, destination_decimals);
-        let destination: u64 = 1;
-
-        // Compute expected route hash (same template as written to buffer, but patched)
-        let mut route_template = vec![0u8; 128];
-        let amount_bytes = to_be_uint256(route_amount);
-        route_template[32..64].copy_from_slice(&amount_bytes);
-        route_template[96..128].copy_from_slice(&amount_bytes);
-        let route_hash = keccak256(&route_template);
-
-        let reward = portal::types::Reward {
-            deadline: u64::MAX,
-            creator: self.user.pubkey(),
-            prover: Pubkey::new_unique(),
-            native_amount: 0,
-            tokens: vec![portal::types::TokenAmount {
-                token: self.mint,
-                amount: actual_reward,
-            }],
-        };
-        let reward_hash = reward.hash();
-        let intent_hash = portal::types::intent_hash(destination, &route_hash, &reward_hash);
-
-        let (vault, _) = portal::state::vault_pda(&intent_hash);
-        let vault_ata = get_associated_token_address(&vault, &self.mint);
-
-        self.build_close_ix(
-            vault,
-            vault_ata,
-            reward.prover,
-            reward_amount,
-            flat_fee,
-            scalar_num,
-            scalar_denom,
-            source_decimals,
-            destination_decimals,
-        )
-    }
-
-    /// Build close_and_create_intent with calldata patching skipped (Case 3).
-    pub fn close_and_create_ix_skip_calldata(
-        &self,
-        pre_balance: u64,
-        post_balance: u64,
-        flat_fee: u64,
-        scalar_num: u64,
-        scalar_denom: u64,
-        source_decimals: u8,
-        destination_decimals: u8,
-        reward_amount: u64,
-    ) -> Instruction {
-        let swap_output = post_balance - pre_balance;
-        let actual_reward = if reward_amount == 0 {
-            swap_output
-        } else {
-            reward_amount
-        };
-        let net_amount = swap_output * scalar_num / scalar_denom - flat_fee;
-        let route_amount =
-            convert_decimals(net_amount as u128, source_decimals, destination_decimals);
-        let destination: u64 = 1;
-
-        // Only offset 32 is patched, bytes 96..128 stay 0xAB
-        let mut route_template = vec![0xABu8; 128];
-        let amount_bytes = to_be_uint256(route_amount);
-        route_template[32..64].copy_from_slice(&amount_bytes);
-        let route_hash = keccak256(&route_template);
-
-        let reward = portal::types::Reward {
-            deadline: u64::MAX,
-            creator: self.user.pubkey(),
-            prover: Pubkey::new_unique(),
-            native_amount: 0,
-            tokens: vec![portal::types::TokenAmount {
-                token: self.mint,
-                amount: actual_reward,
-            }],
-        };
-        let reward_hash = reward.hash();
-        let intent_hash = portal::types::intent_hash(destination, &route_hash, &reward_hash);
-
-        let (vault, _) = portal::state::vault_pda(&intent_hash);
-        let vault_ata = get_associated_token_address(&vault, &self.mint);
-
-        self.build_close_ix(
-            vault,
-            vault_ata,
-            reward.prover,
-            reward_amount,
-            flat_fee,
-            scalar_num,
-            scalar_denom,
-            source_decimals,
-            destination_decimals,
-        )
-    }
-
-    /// Build close_and_create_intent for error cases (dummy vault, will revert before validation).
-    pub fn close_and_create_ix_error_case(
-        &self,
-        flat_fee: u64,
-        scalar_num: u64,
-        scalar_denom: u64,
-        source_decimals: u8,
-        destination_decimals: u8,
-    ) -> Instruction {
-        let dummy_vault = Pubkey::new_unique();
-        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
-
-        self.build_close_ix(
-            dummy_vault,
-            vault_ata,
-            Pubkey::new_unique(),
-            0,
-            flat_fee,
-            scalar_num,
-            scalar_denom,
-            source_decimals,
-            destination_decimals,
-        )
-    }
-
-    pub fn close_and_create_ix_wrong_reward_token(&self) -> Instruction {
-        let dummy_vault = Pubkey::new_unique();
-        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
-        let (swap_state, _) = self.swap_state_pda();
-        let (route_buffer, _) = self.route_buffer_pda();
+    pub fn create_intent_ix(&self, route: Vec<u8>, reward_amount: u64) -> Instruction {
+        let reward = self.build_reward(reward_amount);
+        let (vault, vault_ata) = self.derive_vault(&route, &reward);
 
         let args = swap_intent::instructions::CreateIntentArgs {
             destination: 1,
-            reward_deadline: u64::MAX,
-            reward_creator: self.user.pubkey(),
-            reward_prover: Pubkey::new_unique(),
-            reward_token: Pubkey::new_unique(), // deliberately wrong
-            reward_amount: 0,
-            flat_fee: 0,
-            scalar_num: 1,
-            scalar_denom: 1,
-            source_decimals: 6,
-            destination_decimals: 6,
+            route,
+            reward,
             allow_partial: false,
         };
 
-        let mut data = anchor_discriminator("close_and_create_intent");
+        let mut data = anchor_discriminator("create_intent");
         data.extend_from_slice(&args.try_to_vec().unwrap());
 
         Instruction::new_with_bytes(
             swap_intent::ID,
             &data,
-            self.close_accounts(swap_state, route_buffer, dummy_vault, vault_ata),
+            self.create_intent_accounts(vault, vault_ata),
         )
     }
 
-    pub fn close_and_create_ix_wrong_token_account(&self, wrong_ata: Pubkey) -> Instruction {
-        let dummy_vault = Pubkey::new_unique();
-        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
-        let (swap_state, _) = self.swap_state_pda();
-        let (route_buffer, _) = self.route_buffer_pda();
+    pub fn create_intent_from_buffer_ix(
+        &self,
+        route_for_hash: &[u8],
+        reward_amount: u64,
+    ) -> Instruction {
+        let reward = self.build_reward(reward_amount);
+        let (vault, vault_ata) = self.derive_vault(route_for_hash, &reward);
 
-        let args = swap_intent::instructions::CreateIntentArgs {
+        let args = swap_intent::instructions::CreateIntentFromBufferArgs {
             destination: 1,
-            reward_deadline: u64::MAX,
-            reward_creator: self.user.pubkey(),
-            reward_prover: Pubkey::new_unique(),
-            reward_token: self.mint,
-            reward_amount: 0,
-            flat_fee: 0,
-            scalar_num: 1,
-            scalar_denom: 1,
-            source_decimals: 6,
-            destination_decimals: 6,
+            reward,
             allow_partial: false,
         };
 
-        let mut data = anchor_discriminator("close_and_create_intent");
+        let mut data = anchor_discriminator("create_intent_from_buffer");
         data.extend_from_slice(&args.try_to_vec().unwrap());
 
-        // Override the output_token_account with wrong_ata
-        let mut accounts = self.close_accounts(swap_state, route_buffer, dummy_vault, vault_ata);
-        accounts[3] = AccountMeta::new_readonly(wrong_ata, false); // position of output_token_account
+        let (route_buffer, _) = self.route_buffer_pda();
+        let mut accounts = vec![
+            AccountMeta::new(self.user.pubkey(), true),
+            AccountMeta::new(route_buffer, false),
+        ];
+        accounts.extend(self.portal_and_remaining_accounts(vault, vault_ata));
+
         Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
     }
 
-    pub fn close_and_create_ix_error_case_with_reward(&self, reward_amount: u64) -> Instruction {
-        let dummy_vault = Pubkey::new_unique();
-        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
+    pub fn create_intent_from_buffer_ix_as(
+        &self,
+        attacker: &Pubkey,
+        reward_amount: u64,
+    ) -> Instruction {
+        let route = vec![0u8; 128];
+        let reward = portal::types::Reward {
+            deadline: u64::MAX,
+            creator: *attacker,
+            prover: Pubkey::new_unique(),
+            native_amount: 0,
+            tokens: vec![portal::types::TokenAmount {
+                token: self.mint,
+                amount: reward_amount,
+            }],
+        };
+        let (vault, vault_ata) = self.derive_vault(&route, &reward);
 
-        self.build_close_ix(
-            dummy_vault,
-            vault_ata,
-            Pubkey::new_unique(),
-            reward_amount,
-            0,
-            1,
-            1,
-            6,
-            6,
-        )
+        let args = swap_intent::instructions::CreateIntentFromBufferArgs {
+            destination: 1,
+            reward,
+            allow_partial: false,
+        };
+
+        let mut data = anchor_discriminator("create_intent_from_buffer");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        let (route_buffer, _) = self.route_buffer_pda();
+        let mut accounts = vec![
+            AccountMeta::new(*attacker, true),
+            AccountMeta::new(route_buffer, false),
+        ];
+        accounts.extend(self.portal_and_remaining_accounts(vault, vault_ata));
+
+        Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
     }
 
-    pub fn cancel_ix_wrong_user(&self, attacker: &Keypair) -> Instruction {
-        let (swap_state, _) = self.swap_state_pda();
-        let data = anchor_discriminator("cancel");
+    pub fn create_intent_ix_wrong_vault(
+        &self,
+        route: Vec<u8>,
+        reward_amount: u64,
+    ) -> Instruction {
+        let dummy_vault = Pubkey::new_unique();
+        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
+        let reward = self.build_reward(reward_amount);
+
+        let args = swap_intent::instructions::CreateIntentArgs {
+            destination: 1,
+            route,
+            reward,
+            allow_partial: false,
+        };
+
+        let mut data = anchor_discriminator("create_intent");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
 
         Instruction::new_with_bytes(
             swap_intent::ID,
             &data,
-            vec![
-                AccountMeta::new(attacker.pubkey(), true),
-                AccountMeta::new(swap_state, false),
-            ],
+            self.create_intent_accounts(dummy_vault, vault_ata),
         )
+    }
+
+    pub fn create_intent_ix_wrong_portal(
+        &self,
+        route: Vec<u8>,
+        reward_amount: u64,
+    ) -> Instruction {
+        let reward = self.build_reward(reward_amount);
+        let (vault, vault_ata) = self.derive_vault(&route, &reward);
+
+        let args = swap_intent::instructions::CreateIntentArgs {
+            destination: 1,
+            route,
+            reward,
+            allow_partial: false,
+        };
+
+        let mut data = anchor_discriminator("create_intent");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        // spl_token::ID is executable but not portal::ID
+        let accounts = vec![
+            AccountMeta::new(self.user.pubkey(), true),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
+            AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+            AccountMeta::new(self.user_ata(), false),
+            AccountMeta::new(vault_ata, false),
+            AccountMeta::new_readonly(self.mint, false),
+        ];
+
+        Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
+    }
+
+    pub fn create_intent_ix_bad_remaining(
+        &self,
+        route: Vec<u8>,
+        reward_amount: u64,
+    ) -> Instruction {
+        let reward = self.build_reward(reward_amount);
+        let (vault, vault_ata) = self.derive_vault(&route, &reward);
+
+        let args = swap_intent::instructions::CreateIntentArgs {
+            destination: 1,
+            route,
+            reward,
+            allow_partial: false,
+        };
+
+        let mut data = anchor_discriminator("create_intent");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        // 2 remaining accounts instead of 3 (missing mint)
+        let accounts = vec![
+            AccountMeta::new(self.user.pubkey(), true),
+            AccountMeta::new_readonly(portal::ID, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
+            AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+            AccountMeta::new(self.user_ata(), false),
+            AccountMeta::new(vault_ata, false),
+        ];
+
+        Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
+    }
+
+    // ── Transaction senders ───────────────────────────────────────────
+
+    pub fn send(&mut self, ixs: &[Instruction]) -> TransactionResult {
+        self.send_as(&self.user.insecure_clone(), ixs)
     }
 
     pub fn send_as(&mut self, signer: &Keypair, ixs: &[Instruction]) -> TransactionResult {
@@ -466,83 +398,50 @@ impl Context {
         result.map_err(Box::new)
     }
 
-    pub fn send(&mut self, ixs: &[Instruction]) -> TransactionResult {
-        let mut all_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(
-            COMPUTE_UNIT_LIMIT,
-        )];
-        all_ixs.extend_from_slice(ixs);
-
-        let tx = Transaction::new(
-            &[&self.user],
-            Message::new(&all_ixs, Some(&self.user.pubkey())),
-            self.svm.latest_blockhash(),
-        );
-        let result = self.svm.send_transaction(tx);
-        self.svm.expire_blockhash();
-        result.map_err(Box::new)
-    }
-
     // ── Private helpers ────────────────────────────────────────────────
 
-    fn build_close_ix(
-        &self,
-        vault: Pubkey,
-        vault_ata: Pubkey,
-        reward_prover: Pubkey,
-        reward_amount: u64,
-        flat_fee: u64,
-        scalar_num: u64,
-        scalar_denom: u64,
-        source_decimals: u8,
-        destination_decimals: u8,
-    ) -> Instruction {
-        let (swap_state, _) = self.swap_state_pda();
-        let (route_buffer, _) = self.route_buffer_pda();
-
-        let args = swap_intent::instructions::CreateIntentArgs {
-            destination: 1,
-            reward_deadline: u64::MAX,
-            reward_creator: self.user.pubkey(),
-            reward_prover,
-            reward_token: self.mint,
-            reward_amount,
-            flat_fee,
-            scalar_num,
-            scalar_denom,
-            source_decimals,
-            destination_decimals,
-            allow_partial: false,
-        };
-
-        let mut data = anchor_discriminator("close_and_create_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
-
-        Instruction::new_with_bytes(
-            swap_intent::ID,
-            &data,
-            self.close_accounts(swap_state, route_buffer, vault, vault_ata),
-        )
+    fn build_reward(&self, amount: u64) -> portal::types::Reward {
+        portal::types::Reward {
+            deadline: u64::MAX,
+            creator: self.user.pubkey(),
+            prover: Pubkey::new_unique(),
+            native_amount: 0,
+            tokens: vec![portal::types::TokenAmount {
+                token: self.mint,
+                amount,
+            }],
+        }
     }
 
-    fn close_accounts(
+    fn derive_vault(&self, route: &[u8], reward: &portal::types::Reward) -> (Pubkey, Pubkey) {
+        let route_hash = keccak256(route);
+        let reward_hash = reward.hash();
+        let intent_hash = portal::types::intent_hash(1, &route_hash, &reward_hash);
+        let (vault, _) = portal::state::vault_pda(&intent_hash);
+        let vault_ata = get_associated_token_address(&vault, &self.mint);
+        (vault, vault_ata)
+    }
+
+    fn create_intent_accounts(&self, vault: Pubkey, vault_ata: Pubkey) -> Vec<AccountMeta> {
+        let mut accounts = vec![AccountMeta::new(self.user.pubkey(), true)];
+        accounts.extend(self.portal_and_remaining_accounts(vault, vault_ata));
+        accounts
+    }
+
+    /// Accounts shared by both create_intent variants: portal + programs + remaining.
+    fn portal_and_remaining_accounts(
         &self,
-        swap_state: Pubkey,
-        route_buffer: Pubkey,
         vault: Pubkey,
         vault_ata: Pubkey,
     ) -> Vec<AccountMeta> {
         vec![
-            AccountMeta::new(self.user.pubkey(), true),
-            AccountMeta::new(swap_state, false),
-            AccountMeta::new(route_buffer, false),
-            AccountMeta::new_readonly(self.user_ata(), false),
             AccountMeta::new_readonly(portal::ID, false),
             AccountMeta::new(vault, false),
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
             AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
             AccountMeta::new_readonly(system_program::ID, false),
-            // remaining_accounts: from_ata, vault_ata, mint
+            // remaining_accounts: [from_ata, vault_ata, mint]
             AccountMeta::new(self.user_ata(), false),
             AccountMeta::new(vault_ata, false),
             AccountMeta::new_readonly(self.mint, false),
@@ -554,22 +453,6 @@ fn anchor_discriminator(name: &str) -> Vec<u8> {
     let full = format!("global:{}", name);
     let hash = solana_sdk::hash::hash(full.as_bytes());
     hash.to_bytes()[..8].to_vec()
-}
-
-fn to_be_uint256(value: u128) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    bytes[16..32].copy_from_slice(&value.to_be_bytes());
-    bytes
-}
-
-fn convert_decimals(amount: u128, source_decimals: u8, destination_decimals: u8) -> u128 {
-    if source_decimals > destination_decimals {
-        amount / 10u128.pow((source_decimals - destination_decimals) as u32)
-    } else if destination_decimals > source_decimals {
-        amount * 10u128.pow((destination_decimals - source_decimals) as u32)
-    } else {
-        amount
-    }
 }
 
 fn keccak256(data: &[u8]) -> Bytes32 {
@@ -584,5 +467,12 @@ pub fn is_custom_error(result: &Box<FailedTransactionMetadata>, expected_code: u
     matches!(
         result.err,
         TransactionError::InstructionError(_, InstructionError::Custom(code)) if code == expected_code
+    )
+}
+
+pub fn is_anchor_error(result: &Box<FailedTransactionMetadata>) -> bool {
+    matches!(
+        result.err,
+        TransactionError::InstructionError(_, InstructionError::Custom(_))
     )
 }

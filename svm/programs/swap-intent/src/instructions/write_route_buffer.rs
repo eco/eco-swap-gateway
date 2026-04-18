@@ -4,15 +4,7 @@ use crate::state::{RouteBuffer, ROUTE_BUFFER_SEED};
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct WriteRouteBufferArgs {
-    /// ABI-encoded route template with placeholder amounts.
-    pub route_template: Vec<u8>,
-
-    /// Byte offset of `tokens[0].amount` in `route_template` (always patched).
-    pub tokens_amount_offset: u32,
-
-    /// Byte offset of transfer amount in `calls[0].data`.
-    /// Set to `u32::MAX` to skip patching (Case 3: DEX swap routes).
-    pub calldata_amount_offset: u32,
+    pub route: Vec<u8>,
 }
 
 #[derive(Accounts)]
@@ -38,9 +30,7 @@ pub fn write_route_buffer(
 ) -> Result<()> {
     let route_buffer = &mut ctx.accounts.route_buffer;
     route_buffer.user = ctx.accounts.user.key();
-    route_buffer.tokens_amount_offset = args.tokens_amount_offset;
-    route_buffer.calldata_amount_offset = args.calldata_amount_offset;
-    route_buffer.route_data = args.route_template;
+    route_buffer.route_data = args.route;
 
     Ok(())
 }
