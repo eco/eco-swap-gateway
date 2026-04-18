@@ -1,12 +1,13 @@
 /**
- * SwapIntent Example: Fartcoin → USDC on Solana, then USDC on Base
+ * Swap & Publish Intent: Fartcoin → USDC on Solana, then USDC on Base
  *
- * This script demonstrates the full sandwich pattern:
- *   1. SwapIntent::open  (snapshot USDC balance)
- *   2. Jupiter swap      (Fartcoin → USDC)
- *   3. SwapIntent::close_and_create_intent (compute fees, patch route, CPI Portal)
+ * Flow:
+ *   Setup tx:  write_route_buffer (stores ~608-byte ABI-encoded route in PDA)
+ *   Main tx:   Jupiter swap + create_intent_from_buffer (atomic)
  *
- * All three go in a single atomic versioned transaction.
+ * The main transaction is atomic — if the swap or intent creation fails,
+ * everything reverts. Fee-adjusted amounts are pre-computed off-chain using
+ * Jupiter's minimum guaranteed output (after slippage).
  *
  * Usage:
  *   PRIVATE_KEY=<base58> npx tsx src/swapAndCreateIntent.ts
@@ -15,7 +16,6 @@
 import "dotenv/config";
 import crypto from "crypto";
 import {
-  AddressLookupTableProgram,
   Connection,
   Keypair,
   PublicKey,
@@ -24,6 +24,7 @@ import {
   TransactionMessage,
   VersionedTransaction,
   AddressLookupTableAccount,
+  AddressLookupTableProgram,
   ComputeBudgetProgram,
 } from "@solana/web3.js";
 import {
@@ -36,7 +37,6 @@ import {
   encodeAbiParameters,
   encodeFunctionData,
   erc20Abi,
-  padHex,
   type Hex,
   type Address,
 } from "viem";
@@ -45,9 +45,9 @@ import bs58 from "bs58";
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
-const FARTCOIN_AMOUNT = 0n; // Use raw amount below instead
 const FARTCOIN_RAW_AMOUNT = 300_000n; // 0.3 Fartcoin (raw, 6 decimals)
 const FARTCOIN_DECIMALS = 6;
+const SLIPPAGE_BPS = 300; // 3% slippage for volatile tokens
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -56,8 +56,8 @@ const FARTCOIN_MINT = new PublicKey(
   "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
 );
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
-const SWAP_INTENT_PROGRAM = new PublicKey(
-  "SwapXCqJ3cwYZVUinbG6zxJYLgX4joT9KqvGqetnj5d",
+const INTENT_PUBLISHER_PROGRAM = new PublicKey(
+  "Ecof7tm19p8THsL3oQLWrUfji7Um47CemibkNSBjxJd3",
 );
 const PORTAL_PROGRAM = new PublicKey(
   "Ecoo5HDM2XCBy7QzkhDGrAmnRcWw7emU6xGr7CcCmooo",
@@ -72,32 +72,37 @@ const PORTAL_BASE: Address = "0x399Dbd5DF04f83103F77A58cBa2B7c4d3cdede97";
 const BASE_CHAIN_ID = 8453n;
 
 // Fee parameters (matching EVM script: 6 bps scalar, $0.01 flat)
-const SCALAR_FEE_BPS = 6n;
-const SCALAR_DENOM = 10000n;
-const SCALAR_NUM = SCALAR_DENOM - SCALAR_FEE_BPS; // 9994
+const SCALAR_DENOM = 10_000n;
+const SCALAR_NUM = SCALAR_DENOM - 6n; // 9994
 const FLAT_FEE = 10_000n; // $0.01 in 6-decimal USDC
 
-// Decimal config
-const SOURCE_DECIMALS = 6; // USDC on Solana
-const DESTINATION_DECIMALS = 6; // USDC on Base
-
-// Instruction discriminators (from Anchor IDL)
+// Instruction discriminators (SHA256("global:<name>")[0:8])
 const WRITE_ROUTE_BUFFER_DISCRIMINATOR = Buffer.from([
   75, 235, 140, 42, 51, 248, 84, 98,
 ]);
-const OPEN_DISCRIMINATOR = Buffer.from([228, 220, 155, 71, 199, 189, 60, 45]);
-const CLOSE_DISCRIMINATOR = Buffer.from([122, 166, 202, 12, 24, 110, 189, 7]);
-const CANCEL_DISCRIMINATOR = Buffer.from([
-  232, 219, 223, 41, 219, 236, 220, 190,
+const CREATE_INTENT_FROM_BUFFER_DISCRIMINATOR = Buffer.from([
+  167, 102, 202, 28, 15, 211, 184, 138,
+]);
+const CLOSE_ROUTE_BUFFER_DISCRIMINATOR = Buffer.from([
+  66, 5, 208, 96, 30, 99, 2, 238,
 ]);
 
 // PDA seeds
-const SWAP_STATE_SEED = Buffer.from("swap_state");
 const ROUTE_BUFFER_SEED = Buffer.from("route_buffer");
 const VAULT_SEED = Buffer.from("vault");
 
-// Skip calldata patch sentinel
-const SKIP_CALLDATA_PATCH = 0xffffffff;
+// On-chain RouteBuffer max capacity
+const ROUTE_BUFFER_MAX_LEN = 1024;
+
+// ─── Types ─────────────────────────────────────────────────────────────────
+
+interface Reward {
+  deadline: bigint;
+  creator: PublicKey;
+  prover: PublicKey;
+  nativeAmount: bigint;
+  tokens: Array<{ token: PublicKey; amount: bigint }>;
+}
 
 // ─── ABI Type for EVM Route ────────────────────────────────────────────────
 
@@ -128,34 +133,20 @@ const EVMRouteAbiType = {
   ],
 };
 
-// ─── Route Template Builder ────────────────────────────────────────────────
+// ─── Route Builder ─────────────────────────────────────────────────────────
 
 /**
- * Build an ABI-encoded route template and compute the byte offsets where
- * the on-chain program must patch the actual `routeAmount`.
- *
- * Uses a unique MARKER value to locate the amount positions, then replaces
- * them with zero. Follows the same pattern as the EVM script.
+ * Build an ABI-encoded route with the actual routeAmount baked in.
+ * The route instructs the solver to transfer USDC to the recipient on Base.
  */
-function buildRouteTemplate(recipient: Address): {
-  routeTemplate: Buffer;
-  tokensAmountOffset: number;
-  calldataAmountOffset: number;
-} {
-  const MARKER = BigInt(
-    "0xDEAD00000000000000000000000000000000000000000000000000000000BEEF",
-  );
-  const markerHex = padHex(`0x${MARKER.toString(16)}`, { size: 32 })
-    .toLowerCase()
-    .slice(2);
-
-  const routeDeadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+function buildRoute(routeAmount: bigint, recipient: Address): Buffer {
+  const routeDeadline = BigInt(Math.floor(Date.now() / 1000) + 7200);
   const salt = `0x${crypto.randomBytes(32).toString("hex")}` as Hex;
 
   const transferCalldata = encodeFunctionData({
     abi: erc20Abi,
     functionName: "transfer",
-    args: [recipient, MARKER],
+    args: [recipient, routeAmount],
   });
 
   const route = {
@@ -163,27 +154,12 @@ function buildRouteTemplate(recipient: Address): {
     deadline: routeDeadline,
     portal: PORTAL_BASE,
     nativeAmount: 0n,
-    tokens: [{ token: USDC_BASE, amount: MARKER }],
+    tokens: [{ token: USDC_BASE, amount: routeAmount }],
     calls: [{ target: USDC_BASE, data: transferCalldata, value: 0n }],
   };
 
   const encoded = encodeAbiParameters([EVMRouteAbiType], [route]);
-  const hex = encoded.slice(2).toLowerCase();
-
-  const firstPos = hex.indexOf(markerHex);
-  if (firstPos === -1) throw new Error("MARKER not found (tokens.amount)");
-  const tokensAmountOffset = firstPos / 2;
-
-  const secondPos = hex.indexOf(markerHex, firstPos + 1);
-  if (secondPos === -1) throw new Error("MARKER not found (calldata.amount)");
-  const calldataAmountOffset = secondPos / 2;
-
-  // Replace markers with zero — the program patches them on-chain
-  const zeroWord = "0".repeat(64);
-  const cleanHex = hex.replaceAll(markerHex, zeroWord);
-  const routeTemplate = Buffer.from(cleanHex, "hex");
-
-  return { routeTemplate, tokensAmountOffset, calldataAmountOffset };
+  return Buffer.from(encoded.slice(2), "hex");
 }
 
 // ─── Hash Helpers ──────────────────────────────────────────────────────────
@@ -209,19 +185,13 @@ function writeU32LE(value: number): Buffer {
 }
 
 /**
- * Borsh-serialize a Reward struct and keccak256 it.
- * Must exactly match Portal's Reward::hash() on-chain.
+ * Borsh-serialize a Reward struct.
+ * Must match Portal's Reward Borsh layout exactly.
  *
  * Layout: deadline(u64 LE) + creator(32) + prover(32) + native_amount(u64 LE)
  *         + tokens_len(u32 LE) + [token(32) + amount(u64 LE)]*
  */
-function hashReward(reward: {
-  deadline: bigint;
-  creator: PublicKey;
-  prover: PublicKey;
-  nativeAmount: bigint;
-  tokens: Array<{ token: PublicKey; amount: bigint }>;
-}): Buffer {
+function serializeReward(reward: Reward): Buffer {
   const parts: Buffer[] = [
     writeU64LE(reward.deadline),
     reward.creator.toBuffer(),
@@ -233,35 +203,15 @@ function hashReward(reward: {
     parts.push(t.token.toBuffer());
     parts.push(writeU64LE(t.amount));
   }
-  return keccak256(Buffer.concat(parts));
+  return Buffer.concat(parts);
 }
 
-/**
- * Compute route_hash = keccak256(patchedRouteTemplate).
- * The template has the route_amount written at both offsets as BE uint256.
- */
-function computeRouteHash(
-  routeTemplate: Buffer,
-  routeAmount: bigint,
-  tokensAmountOffset: number,
-  calldataAmountOffset: number,
-): Buffer {
-  const patched = Buffer.from(routeTemplate);
-  const amountBE = toBEUint256(routeAmount);
-  amountBE.copy(patched, tokensAmountOffset);
-  amountBE.copy(patched, calldataAmountOffset);
-  return keccak256(patched);
+/** keccak256(borsh(Reward)) — matches Portal's Reward::hash() on-chain */
+function hashReward(reward: Reward): Buffer {
+  return keccak256(serializeReward(reward));
 }
 
-/** Convert a bigint to a 32-byte big-endian uint256 */
-function toBEUint256(value: bigint): Buffer {
-  const hex = value.toString(16).padStart(64, "0");
-  return Buffer.from(hex, "hex");
-}
-
-/**
- * intent_hash = keccak256(destination_be8 || route_hash || reward_hash)
- */
+/** intent_hash = keccak256(destination_be8 || route_hash || reward_hash) */
 function computeIntentHash(
   destination: bigint,
   routeHash: Buffer,
@@ -274,51 +224,23 @@ function computeIntentHash(
 
 // ─── Borsh Encoding ────────────────────────────────────────────────────────
 
-/** Encode WriteRouteBufferArgs: route_template (Vec<u8>) + two u32 offsets */
-function encodeWriteRouteBufferArgs(
-  routeTemplate: Buffer,
-  tokensAmountOffset: number,
-  calldataAmountOffset: number,
-): Buffer {
-  const offsetBuf1 = Buffer.alloc(4);
-  offsetBuf1.writeUInt32LE(tokensAmountOffset);
-  const offsetBuf2 = Buffer.alloc(4);
-  offsetBuf2.writeUInt32LE(calldataAmountOffset);
-  return Buffer.concat([
-    writeU32LE(routeTemplate.length),
-    routeTemplate,
-    offsetBuf1,
-    offsetBuf2,
-  ]);
+/** Encode WriteRouteBufferArgs: { route: Vec<u8> } */
+function encodeWriteRouteBufferArgs(route: Buffer): Buffer {
+  return Buffer.concat([writeU32LE(route.length), route]);
 }
 
-/** Encode CreateIntentArgs (no route — read from buffer PDA) */
-function encodeCreateIntentArgs(args: {
+/**
+ * Encode CreateIntentFromBufferArgs:
+ *   destination: u64, reward: Reward (Borsh), allow_partial: bool
+ */
+function encodeCreateIntentFromBufferArgs(args: {
   destination: bigint;
-  rewardDeadline: bigint;
-  rewardCreator: PublicKey;
-  rewardProver: PublicKey;
-  rewardToken: PublicKey;
-  rewardAmount: bigint;
-  flatFee: bigint;
-  scalarNum: bigint;
-  scalarDenom: bigint;
-  sourceDecimals: number;
-  destinationDecimals: number;
+  reward: Reward;
   allowPartial: boolean;
 }): Buffer {
   return Buffer.concat([
     writeU64LE(args.destination),
-    writeU64LE(args.rewardDeadline),
-    args.rewardCreator.toBuffer(),
-    args.rewardProver.toBuffer(),
-    args.rewardToken.toBuffer(),
-    writeU64LE(args.rewardAmount),
-    writeU64LE(args.flatFee),
-    writeU64LE(args.scalarNum),
-    writeU64LE(args.scalarDenom),
-    Buffer.from([args.sourceDecimals]),
-    Buffer.from([args.destinationDecimals]),
+    serializeReward(args.reward),
     Buffer.from([args.allowPartial ? 1 : 0]),
   ]);
 }
@@ -352,13 +274,15 @@ async function getJupiterQuote(
   inputMint: string,
   outputMint: string,
   amount: bigint,
+  slippageBps: number,
 ): Promise<JupiterQuote> {
-  // 300 bps (3%) slippage for volatile tokens. The actual swap output is read
-  // after confirmation to compute the exact vault PDA for close_and_create.
-  const url = `https://api.jup.ag/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=300`;
+  const url = `https://api.jup.ag/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Jupiter quote failed: ${res.statusText}`);
-  return res.json();
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Jupiter quote failed (${res.status}): ${body}`);
+  }
+  return await res.json();
 }
 
 async function getJupiterSwapInstructions(
@@ -378,10 +302,10 @@ async function getJupiterSwapInstructions(
   if (!res.ok) {
     const body = await res.text();
     throw new Error(
-      `Jupiter swap-instructions failed: ${res.statusText} — ${body}`,
+      `Jupiter swap-instructions failed (${res.status}): ${body}`,
     );
   }
-  return res.json();
+  return await res.json();
 }
 
 function jupiterIxToInstruction(ix: JupiterIx): TransactionInstruction {
@@ -396,6 +320,133 @@ function jupiterIxToInstruction(ix: JupiterIx): TransactionInstruction {
   });
 }
 
+// ─── Transaction Helpers ───────────────────────────────────────────────────
+
+async function sendV0Tx(
+  connection: Connection,
+  keypair: Keypair,
+  instructions: TransactionInstruction[],
+  lookupTables: AddressLookupTableAccount[] = [],
+): Promise<string> {
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash("confirmed");
+  const msg = new TransactionMessage({
+    payerKey: keypair.publicKey,
+    recentBlockhash: blockhash,
+    instructions,
+  }).compileToV0Message(lookupTables);
+  const tx = new VersionedTransaction(msg);
+  tx.sign([keypair]);
+  const sig = await connection.sendTransaction(tx, { maxRetries: 3 });
+
+  const confirmation = await connection.confirmTransaction(
+    { signature: sig, blockhash, lastValidBlockHeight },
+    "confirmed",
+  );
+  if (confirmation.value.err) {
+    throw new Error(
+      `Transaction confirmed but FAILED on-chain: ` +
+        `${JSON.stringify(confirmation.value.err)}. ` +
+        `https://solscan.io/tx/${sig}`,
+    );
+  }
+  return sig;
+}
+
+function buildCloseRouteBufferIx(
+  user: PublicKey,
+  routeBufferPda: PublicKey,
+): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: INTENT_PUBLISHER_PROGRAM,
+    keys: [
+      { pubkey: user, isSigner: true, isWritable: true },
+      { pubkey: routeBufferPda, isSigner: false, isWritable: true },
+    ],
+    data: CLOSE_ROUTE_BUFFER_DISCRIMINATOR,
+  });
+}
+
+async function resolveLookupTables(
+  connection: Connection,
+  addresses: string[],
+): Promise<AddressLookupTableAccount[]> {
+  const tables: AddressLookupTableAccount[] = [];
+  for (const addr of addresses) {
+    const pubkey = new PublicKey(addr);
+    const result = await connection.getAddressLookupTable(pubkey);
+    if (!result.value) {
+      throw new Error(
+        `Failed to resolve Jupiter ALT: ${addr}. Retry with a fresh quote.`,
+      );
+    }
+    tables.push(result.value);
+  }
+  return tables;
+}
+
+// ─── Address Lookup Table ──────────────────────────────────────────────────
+
+/**
+ * Static accounts used by intent-publisher that aren't in Jupiter's ALTs.
+ * Putting these in an ALT saves ~31 bytes per account in the main tx.
+ */
+const INTENT_ALT_ADDRESSES = [
+  PORTAL_PROGRAM,
+  USDC_MINT,
+  TOKEN_2022_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+];
+
+/**
+ * Load an existing ALT from INTENT_PUBLISHER_ALT env var, or create one
+ * with the static intent-publisher accounts. The ALT is reusable across runs.
+ */
+async function getOrCreateIntentAlt(
+  connection: Connection,
+  keypair: Keypair,
+): Promise<AddressLookupTableAccount> {
+  const altEnv = process.env.INTENT_PUBLISHER_ALT;
+
+  if (altEnv) {
+    const result = await connection.getAddressLookupTable(
+      new PublicKey(altEnv),
+    );
+    if (result.value) return result.value;
+    console.warn(
+      `INTENT_PUBLISHER_ALT ${altEnv} not found on-chain, creating new one...`,
+    );
+  }
+
+  console.log("Creating intent-publisher ALT (one-time setup)...");
+  const slot = await connection.getSlot("finalized");
+  const [createIx, altAddress] = AddressLookupTableProgram.createLookupTable({
+    authority: keypair.publicKey,
+    payer: keypair.publicKey,
+    recentSlot: slot,
+  });
+  const extendIx = AddressLookupTableProgram.extendLookupTable({
+    payer: keypair.publicKey,
+    authority: keypair.publicKey,
+    lookupTable: altAddress,
+    addresses: INTENT_ALT_ADDRESSES,
+  });
+
+  const sig = await sendV0Tx(connection, keypair, [createIx, extendIx]);
+  console.log(`  ALT created: ${altAddress.toBase58()}`);
+  console.log(`  Tx: ${sig}`);
+  console.log(
+    `  Add to .env for faster startup: INTENT_PUBLISHER_ALT=${altAddress.toBase58()}`,
+  );
+  console.log();
+
+  const result = await connection.getAddressLookupTable(altAddress);
+  if (!result.value) {
+    throw new Error("Failed to fetch newly created ALT");
+  }
+  return result.value;
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -408,186 +459,151 @@ async function main() {
   const connection = new Connection(rpcUrl, "confirmed");
   const user = keypair.publicKey;
 
-  const inputAmount = FARTCOIN_RAW_AMOUNT;
   const rewardDeadline = BigInt(Math.floor(Date.now() / 1000) + 7200);
 
   console.log(`User:           ${user.toBase58()}`);
   console.log(
-    `Input:          ${Number(inputAmount) / 10 ** FARTCOIN_DECIMALS} Fartcoin (${inputAmount} raw)`,
+    `Input:          ${Number(FARTCOIN_RAW_AMOUNT) / 10 ** FARTCOIN_DECIMALS} Fartcoin (${FARTCOIN_RAW_AMOUNT} raw)`,
   );
   console.log(`Swap:           Fartcoin → USDC on Solana (Jupiter)`);
   console.log(`Intent:         USDC on Solana → USDC on Base`);
   console.log();
 
-  // 1. Get Jupiter quote
+  // ─── 1. Get Jupiter quote ─────────────────────────────────────────────────
+
   console.log("Fetching Jupiter quote...");
   const quote = await getJupiterQuote(
     FARTCOIN_MINT.toBase58(),
     USDC_MINT.toBase58(),
-    inputAmount,
+    FARTCOIN_RAW_AMOUNT,
+    SLIPPAGE_BPS,
   );
-  const swapOutput = BigInt(quote.outAmount);
-  console.log(`  Expected output: ${swapOutput} USDC (raw, 6 decimals)`);
+
+  if (!quote.outAmount || !quote.otherAmountThreshold) {
+    throw new Error(
+      `Jupiter quote missing output amounts: outAmount=${quote.outAmount}, ` +
+        `otherAmountThreshold=${quote.otherAmountThreshold}`,
+    );
+  }
+  const expectedOutput = BigInt(quote.outAmount);
+  const minOutput = BigInt(quote.otherAmountThreshold);
+  if (minOutput === 0n) {
+    throw new Error(
+      "Jupiter returned 0 for minimum output — quote may be stale or pair is illiquid",
+    );
+  }
+
+  console.log(`  Expected output:  ${expectedOutput} USDC (raw)`);
+  console.log(
+    `  Min output:       ${minOutput} USDC (after ${SLIPPAGE_BPS} bps slippage)`,
+  );
   console.log();
 
-  // 2. Get Jupiter swap instructions
-  console.log("Fetching Jupiter swap instructions...");
-  const jupiterIxs = await getJupiterSwapInstructions(quote, user.toBase58());
+  // ─── 2. Compute amounts off-chain ─────────────────────────────────────────
 
-  // 3. Build route template (destination chain: Base)
+  const rewardAmount = minOutput;
+  const routeAmount = (rewardAmount * SCALAR_NUM) / SCALAR_DENOM - FLAT_FEE;
+
+  if (routeAmount <= 0n) {
+    throw new Error(
+      `Route amount is ${routeAmount} — swap output too small to cover fees`,
+    );
+  }
+
+  console.log(`Reward amount:  ${rewardAmount} USDC (locked in vault)`);
+  console.log(`Route amount:   ${routeAmount} USDC (delivered on Base)`);
+  console.log(`Solver profit:  ${rewardAmount - routeAmount} USDC`);
+  console.log();
+
+  // ─── 3. Build route with actual amounts ───────────────────────────────────
+
+  // Solana pubkey (32 bytes) truncated to 20 bytes for the EVM recipient address.
+  // The user must control this address on Base (e.g. derived from the same seed).
   const recipient =
     `0x${Buffer.from(user.toBytes()).toString("hex").slice(0, 40)}` as Address;
-  const { routeTemplate, tokensAmountOffset, calldataAmountOffset } =
-    buildRouteTemplate(recipient);
+  const route = buildRoute(routeAmount, recipient);
 
-  console.log(`Route template:          ${routeTemplate.length} bytes`);
-  console.log(`tokensAmountOffset:      ${tokensAmountOffset}`);
-  console.log(`calldataAmountOffset:    ${calldataAmountOffset}`);
-  console.log();
+  if (route.length > ROUTE_BUFFER_MAX_LEN) {
+    throw new Error(
+      `Route is ${route.length} bytes but RouteBuffer max is ${ROUTE_BUFFER_MAX_LEN}`,
+    );
+  }
 
-  // 4. Derive PDAs
-  const rewardAmount = 0n; // 0 = use full swap_output on-chain
-  const [swapStatePda] = PublicKey.findProgramAddressSync(
-    [SWAP_STATE_SEED, user.toBuffer()],
-    SWAP_INTENT_PROGRAM,
+  console.log(`Route:          ${route.length} bytes`);
+  console.log(`Recipient:      ${recipient}`);
+
+  // ─── 4. Compute hashes and derive vault PDA ───────────────────────────────
+
+  const reward: Reward = {
+    deadline: rewardDeadline,
+    creator: user,
+    prover: HYPER_PROVER,
+    nativeAmount: 0n,
+    tokens: [{ token: USDC_MINT, amount: rewardAmount }],
+  };
+
+  const routeHash = keccak256(route);
+  const rewardHash = hashReward(reward);
+  const intentHash = computeIntentHash(BASE_CHAIN_ID, routeHash, rewardHash);
+
+  const [vault] = PublicKey.findProgramAddressSync(
+    [VAULT_SEED, intentHash],
+    PORTAL_PROGRAM,
   );
-  const [routeBufferPda] = PublicKey.findProgramAddressSync(
-    [ROUTE_BUFFER_SEED, user.toBuffer()],
-    SWAP_INTENT_PROGRAM,
-  );
+  const vaultAta = await getAssociatedTokenAddress(USDC_MINT, vault, true);
   const userUsdcAta = await getAssociatedTokenAddress(USDC_MINT, user);
 
-  // Cancel stale swap state if exists (from a previous failed run)
-  const existingState = await connection.getAccountInfo(swapStatePda);
-  if (existingState && existingState.lamports > 0) {
-    console.log("Found stale swap state PDA — cancelling...");
-    const cancelIx = new TransactionInstruction({
-      programId: SWAP_INTENT_PROGRAM,
-      keys: [
-        { pubkey: user, isSigner: true, isWritable: true },
-        { pubkey: swapStatePda, isSigner: false, isWritable: true },
-      ],
-      data: CANCEL_DISCRIMINATOR,
-    });
-    const { blockhash: cbh, lastValidBlockHeight: clvbh } =
-      await connection.getLatestBlockhash("confirmed");
-    const cancelMsg = new TransactionMessage({
-      payerKey: user,
-      recentBlockhash: cbh,
-      instructions: [cancelIx],
-    }).compileToV0Message([]);
-    const cancelTx = new VersionedTransaction(cancelMsg);
-    cancelTx.sign([keypair]);
-    const cancelSig = await connection.sendTransaction(cancelTx);
-    await connection.confirmTransaction(
-      { signature: cancelSig, blockhash: cbh, lastValidBlockHeight: clvbh },
-      "confirmed",
-    );
-    console.log(`  Cancelled: ${cancelSig}`);
-    console.log();
-  }
-
-  const preSwapInfo = await connection.getTokenAccountBalance(userUsdcAta);
-  const preSwapBalance = BigInt(preSwapInfo.value.amount);
-  console.log(`Pre-swap USDC:    ${preSwapBalance}`);
-  console.log(`Swap state PDA:   ${swapStatePda.toBase58()}`);
-  console.log(`Route buffer PDA: ${routeBufferPda.toBase58()}`);
+  console.log(`Intent hash:    ${intentHash.toString("hex")}`);
+  console.log(`Vault PDA:      ${vault.toBase58()}`);
   console.log();
 
-  // 5. Resolve Jupiter Address Lookup Tables
-  const lookupTableAddresses = jupiterIxs.addressLookupTableAddresses.map(
-    (addr) => new PublicKey(addr),
+  // ─── 5. Derive route buffer PDA and load ALT ───────────────────────────────
+
+  const [routeBufferPda] = PublicKey.findProgramAddressSync(
+    [ROUTE_BUFFER_SEED, user.toBuffer()],
+    INTENT_PUBLISHER_PROGRAM,
   );
-  const lookupTables: AddressLookupTableAccount[] = [];
-  for (const addr of lookupTableAddresses) {
-    const result = await connection.getAddressLookupTable(addr);
-    if (result.value) lookupTables.push(result.value);
-  }
 
-  // ─── Setup Tx: write_route_buffer ────────────────────────────────────────
-  // Always write a fresh buffer. If a stale one exists (from a failed run),
-  // close it first via close_route_buffer.
+  const intentAlt = await getOrCreateIntentAlt(connection, keypair);
 
-  const CLOSE_ROUTE_BUFFER_DISCRIMINATOR = Buffer.from([
-    66, 5, 208, 96, 30, 99, 2, 238,
-  ]);
+  // ─── 6. Cleanup stale route buffer ────────────────────────────────────────
 
   const existingBuffer = await connection.getAccountInfo(routeBufferPda);
   if (existingBuffer && existingBuffer.lamports > 0) {
     console.log("Closing stale route buffer...");
-    const closeBufferIx = new TransactionInstruction({
-      programId: SWAP_INTENT_PROGRAM,
-      keys: [
-        { pubkey: user, isSigner: true, isWritable: true },
-        { pubkey: routeBufferPda, isSigner: false, isWritable: true },
-      ],
-      data: CLOSE_ROUTE_BUFFER_DISCRIMINATOR,
-    });
-    const { blockhash, lastValidBlockHeight } =
-      await connection.getLatestBlockhash("confirmed");
-    const msg = new TransactionMessage({
-      payerKey: user,
-      recentBlockhash: blockhash,
-      instructions: [closeBufferIx],
-    }).compileToV0Message([]);
-    const tx = new VersionedTransaction(msg);
-    tx.sign([keypair]);
-    const sig = await connection.sendTransaction(tx, { maxRetries: 3 });
-    await connection.confirmTransaction(
-      { signature: sig, blockhash, lastValidBlockHeight },
-      "confirmed",
-    );
+    const sig = await sendV0Tx(connection, keypair, [
+      buildCloseRouteBufferIx(user, routeBufferPda),
+    ]);
     console.log(`  Closed: ${sig}`);
+    console.log();
   }
 
-  console.log("Writing route buffer...");
-  const writeBufferArgs = encodeWriteRouteBufferArgs(
-    routeTemplate,
-    tokensAmountOffset,
-    calldataAmountOffset,
-  );
+  // ─── 7. Setup Tx: write_route_buffer ──────────────────────────────────────
+
+  console.log("Tx 1 (setup): write_route_buffer...");
+
   const writeBufferIx = new TransactionInstruction({
-    programId: SWAP_INTENT_PROGRAM,
+    programId: INTENT_PUBLISHER_PROGRAM,
     keys: [
       { pubkey: user, isSigner: true, isWritable: true },
       { pubkey: routeBufferPda, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
-    data: Buffer.concat([WRITE_ROUTE_BUFFER_DISCRIMINATOR, writeBufferArgs]),
+    data: Buffer.concat([
+      WRITE_ROUTE_BUFFER_DISCRIMINATOR,
+      encodeWriteRouteBufferArgs(route),
+    ]),
   });
 
-  {
-    const { blockhash, lastValidBlockHeight } =
-      await connection.getLatestBlockhash("confirmed");
-    const msg = new TransactionMessage({
-      payerKey: user,
-      recentBlockhash: blockhash,
-      instructions: [writeBufferIx],
-    }).compileToV0Message([]);
-    const tx = new VersionedTransaction(msg);
-    tx.sign([keypair]);
-    const sig = await connection.sendTransaction(tx, { maxRetries: 3 });
-    await connection.confirmTransaction(
-      { signature: sig, blockhash, lastValidBlockHeight },
-      "confirmed",
-    );
-    console.log(`  Confirmed: ${sig}`);
-  }
+  const setupSig = await sendV0Tx(connection, keypair, [writeBufferIx]);
+  console.log(`  Confirmed: ${setupSig}`);
   console.log();
 
-  // ─── Tx 1: open + Jupiter swap ─────────────────────────────────────────
-  console.log("Sending Tx 1: open + Jupiter swap...");
+  // ─── 8. Main Tx: Jupiter swap + create_intent_from_buffer ─────────────────
 
-  const openIx = new TransactionInstruction({
-    programId: SWAP_INTENT_PROGRAM,
-    keys: [
-      { pubkey: user, isSigner: true, isWritable: true },
-      { pubkey: userUsdcAta, isSigner: false, isWritable: false },
-      { pubkey: swapStatePda, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data: OPEN_DISCRIMINATOR,
-  });
+  console.log("Tx 2 (main): Jupiter swap + create_intent_from_buffer...");
+
+  const jupiterIxs = await getJupiterSwapInstructions(quote, user.toBase58());
 
   const jupiterInstructions: TransactionInstruction[] = [
     ...jupiterIxs.setupInstructions.map(jupiterIxToInstruction),
@@ -597,107 +613,12 @@ async function main() {
       : []),
   ];
 
-  {
-    const { blockhash, lastValidBlockHeight } =
-      await connection.getLatestBlockhash("confirmed");
-    const msg = new TransactionMessage({
-      payerKey: user,
-      recentBlockhash: blockhash,
-      instructions: [
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-        openIx,
-        ...jupiterInstructions,
-      ],
-    }).compileToV0Message(lookupTables);
-    const tx = new VersionedTransaction(msg);
-    tx.sign([keypair]);
-    const sig = await connection.sendTransaction(tx, { maxRetries: 3 });
-    console.log(`  Signature: ${sig}`);
-    await connection.confirmTransaction(
-      { signature: sig, blockhash, lastValidBlockHeight },
-      "confirmed",
-    );
-    console.log("  Confirmed!");
-    console.log(`  Explorer: https://solscan.io/tx/${sig}`);
-  }
-  console.log();
-
-  // ─── Read actual swap output ─────────────────────────────────────────────
-  await new Promise((r) => setTimeout(r, 2000));
-  const postSwapInfo = await connection.getTokenAccountBalance(
-    userUsdcAta,
-    "confirmed",
-  );
-  const postSwapBalance = BigInt(postSwapInfo.value.amount);
-  const actualSwapOutput = postSwapBalance - preSwapBalance;
-
-  if (actualSwapOutput <= 0n) {
-    console.error(
-      `Swap output is ${actualSwapOutput}. Pre: ${preSwapBalance}, Post: ${postSwapBalance}`,
-    );
-    process.exit(1);
-  }
-
-  const actualReward = rewardAmount === 0n ? actualSwapOutput : rewardAmount;
-  const routeAmount = (actualSwapOutput * SCALAR_NUM) / SCALAR_DENOM - FLAT_FEE;
-
-  console.log(`Actual swap output: ${actualSwapOutput} USDC`);
-  console.log(`Reward amount:      ${actualReward}`);
-  console.log(`Route amount:       ${routeAmount}`);
-  console.log(`Solver profit:      ${actualReward - routeAmount}`);
-  console.log();
-
-  // ─── Compute vault PDA from actual amounts ───────────────────────────────
-  const routeHash = computeRouteHash(
-    routeTemplate,
-    routeAmount,
-    tokensAmountOffset,
-    calldataAmountOffset,
-  );
-  const rewardHash = hashReward({
-    deadline: rewardDeadline,
-    creator: user,
-    prover: HYPER_PROVER,
-    nativeAmount: 0n,
-    tokens: [{ token: USDC_MINT, amount: actualReward }],
-  });
-  const intentHash = computeIntentHash(BASE_CHAIN_ID, routeHash, rewardHash);
-
-  const [vault] = PublicKey.findProgramAddressSync(
-    [VAULT_SEED, intentHash],
-    PORTAL_PROGRAM,
-  );
-  const vaultAta = await getAssociatedTokenAddress(USDC_MINT, vault, true);
-
-  console.log(`Intent hash: ${intentHash.toString("hex")}`);
-  console.log(`Vault PDA:   ${vault.toBase58()}`);
-  console.log();
-
-  // ─── Tx 2: close_and_create_intent ───────────────────────────────────────
-  console.log("Sending Tx 2: close_and_create_intent...");
-
-  const closeArgs = encodeCreateIntentArgs({
-    destination: BASE_CHAIN_ID,
-    rewardDeadline,
-    rewardCreator: user,
-    rewardProver: HYPER_PROVER,
-    rewardToken: USDC_MINT,
-    rewardAmount,
-    flatFee: FLAT_FEE,
-    scalarNum: SCALAR_NUM,
-    scalarDenom: SCALAR_DENOM,
-    sourceDecimals: SOURCE_DECIMALS,
-    destinationDecimals: DESTINATION_DECIMALS,
-    allowPartial: false,
-  });
-
-  const closeIx = new TransactionInstruction({
-    programId: SWAP_INTENT_PROGRAM,
+  // Accounts match Anchor struct field order: CreateIntentFromBuffer
+  const createIx = new TransactionInstruction({
+    programId: INTENT_PUBLISHER_PROGRAM,
     keys: [
       { pubkey: user, isSigner: true, isWritable: true },
-      { pubkey: swapStatePda, isSigner: false, isWritable: true },
       { pubkey: routeBufferPda, isSigner: false, isWritable: true },
-      { pubkey: userUsdcAta, isSigner: false, isWritable: false },
       { pubkey: PORTAL_PROGRAM, isSigner: false, isWritable: false },
       { pubkey: vault, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
@@ -708,35 +629,59 @@ async function main() {
         isWritable: false,
       },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      // remaining_accounts: [from_ata, vault_ata, mint] per reward token
       { pubkey: userUsdcAta, isSigner: false, isWritable: true },
       { pubkey: vaultAta, isSigner: false, isWritable: true },
       { pubkey: USDC_MINT, isSigner: false, isWritable: false },
     ],
-    data: Buffer.concat([CLOSE_DISCRIMINATOR, closeArgs]),
+    data: Buffer.concat([
+      CREATE_INTENT_FROM_BUFFER_DISCRIMINATOR,
+      encodeCreateIntentFromBufferArgs({
+        destination: BASE_CHAIN_ID,
+        reward,
+        allowPartial: false,
+      }),
+    ]),
   });
 
-  {
-    const { blockhash, lastValidBlockHeight } =
-      await connection.getLatestBlockhash("confirmed");
-    const msg = new TransactionMessage({
-      payerKey: user,
-      recentBlockhash: blockhash,
-      instructions: [
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-        closeIx,
+  const jupiterLookupTables = await resolveLookupTables(
+    connection,
+    jupiterIxs.addressLookupTableAddresses,
+  );
+  const lookupTables = [...jupiterLookupTables, intentAlt];
+
+  try {
+    const sig = await sendV0Tx(
+      connection,
+      keypair,
+      [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
+        ...jupiterInstructions,
+        createIx,
       ],
-    }).compileToV0Message(lookupTables);
-    const tx = new VersionedTransaction(msg);
-    tx.sign([keypair]);
-    const signature = await connection.sendTransaction(tx, { maxRetries: 3 });
-    console.log(`  Signature: ${signature}`);
-    await connection.confirmTransaction(
-      { signature, blockhash, lastValidBlockHeight },
-      "confirmed",
+      lookupTables,
     );
-    console.log("  Confirmed!");
+    console.log(`  Confirmed: ${sig}`);
     console.log();
-    console.log(`Explorer: https://solscan.io/tx/${signature}`);
+    console.log(`Intent hash: ${intentHash.toString("hex")}`);
+    console.log(`Explorer:    https://solscan.io/tx/${sig}`);
+  } catch (err) {
+    // Main tx failed — close the orphaned route buffer to reclaim rent
+    console.error(
+      "Main transaction failed. Closing route buffer to reclaim rent...",
+    );
+    try {
+      const sig = await sendV0Tx(connection, keypair, [
+        buildCloseRouteBufferIx(user, routeBufferPda),
+      ]);
+      console.log(`  Route buffer closed: ${sig}`);
+    } catch {
+      console.error(
+        `Failed to close route buffer at ${routeBufferPda.toBase58()}. ` +
+          `Run the script again to reclaim rent.`,
+      );
+    }
+    throw err;
   }
 }
 
