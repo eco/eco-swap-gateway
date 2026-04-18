@@ -6,13 +6,13 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-swap_intent = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
+intent_publisher = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
 
 [programs.devnet]
-swap_intent = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
+intent_publisher = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
 
 [programs.mainnet]
-swap_intent = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
+intent_publisher = "BZLuymGnjM1BEA7gnerqKm47c1o7a1q3xTb3G1dei8Bk"
 
 [registry]
 url = "https://api.apr.dev"

@@ -1,5 +1,5 @@
 [package]
-name = "swap-intent"
+name = "intent-publisher"
 version = "0.1.0"
 description = "Publish-and-fund helper for Portal intent creation"
 edition = "2021"
@@ -7,7 +7,7 @@ rust-version = "1.84.0"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "swap_intent"
+name = "intent_publisher"
 
 [features]
 mainnet = ["portal/mainnet"]

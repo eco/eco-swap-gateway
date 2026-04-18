@@ -2,7 +2,7 @@ mod common;
 
 use common::Context;
 use solana_sdk::signer::Signer;
-use swap_intent::instructions::SwapIntentError;
+use intent_publisher::instructions::IntentPublisherError;
 
 // ─── create_intent (route in args) ────────────────────────────────────
 
@@ -89,7 +89,7 @@ fn create_intent_fails_with_invalid_remaining_accounts() {
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
-        common::is_custom_error(&err, SwapIntentError::InvalidRemainingAccounts.into()),
+        common::is_custom_error(&err, IntentPublisherError::InvalidRemainingAccounts.into()),
         "Expected InvalidRemainingAccounts, got: {:?}",
         err.err
     );
@@ -106,7 +106,7 @@ fn create_intent_fails_with_wrong_portal_program() {
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
-        common::is_custom_error(&err, SwapIntentError::InvalidPortalProgram.into()),
+        common::is_custom_error(&err, IntentPublisherError::InvalidPortalProgram.into()),
         "Expected InvalidPortalProgram, got: {:?}",
         err.err
     );
@@ -123,7 +123,7 @@ fn create_intent_fails_with_wrong_vault() {
     let err = ctx.send(&[ix]).unwrap_err();
 
     assert!(
-        common::is_custom_error(&err, SwapIntentError::InvalidVault.into()),
+        common::is_custom_error(&err, IntentPublisherError::InvalidVault.into()),
         "Expected InvalidVault, got: {:?}",
         err.err
     );

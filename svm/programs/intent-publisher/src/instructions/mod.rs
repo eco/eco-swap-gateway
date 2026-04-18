@@ -9,7 +9,7 @@ pub use create_intent::*;
 pub use write_route_buffer::*;
 
 #[error_code]
-pub enum SwapIntentError {
+pub enum IntentPublisherError {
     #[msg("User does not match expected PDA owner")]
     InvalidUser,
     #[msg("Vault PDA does not match expected derivation")]

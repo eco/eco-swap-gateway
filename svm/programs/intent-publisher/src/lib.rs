@@ -11,7 +11,7 @@ pub mod state;
 use instructions::*;
 
 #[program]
-pub mod swap_intent {
+pub mod intent_publisher {
     use super::*;
 
     pub fn write_route_buffer(

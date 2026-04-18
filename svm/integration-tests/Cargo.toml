@@ -10,5 +10,5 @@ eco-svm-std = { workspace = true }
 litesvm = "0.6.1"
 portal = { workspace = true }
 solana-sdk = "2.2.1"
-swap-intent = { workspace = true, features = ["no-entrypoint"] }
+intent-publisher = { workspace = true, features = ["no-entrypoint"] }
 tiny-keccak = { workspace = true }

@@ -19,7 +19,7 @@ use tiny_keccak::{Hasher, Keccak};
 
 const COMPUTE_UNIT_LIMIT: u32 = 400_000;
 const PORTAL_BIN: &[u8] = include_bytes!("../../../../../eco-routes-svm/target/deploy/portal.so");
-const SWAP_INTENT_BIN: &[u8] = include_bytes!("../../../target/deploy/swap_intent.so");
+const INTENT_PUBLISHER_BIN: &[u8] = include_bytes!("../../../target/deploy/intent_publisher.so");
 
 type TransactionResult = Result<TransactionMetadata, Box<FailedTransactionMetadata>>;
 
@@ -35,7 +35,7 @@ impl Context {
         let mut svm = LiteSVM::new();
 
         svm.add_program(portal::ID, PORTAL_BIN);
-        svm.add_program(swap_intent::ID, SWAP_INTENT_BIN);
+        svm.add_program(intent_publisher::ID, INTENT_PUBLISHER_BIN);
 
         let mint_authority = Keypair::new();
         let user = Keypair::new();
@@ -132,7 +132,7 @@ impl Context {
     pub fn route_buffer_pda(&self) -> (Pubkey, u8) {
         Pubkey::find_program_address(
             &[b"route_buffer", self.user.pubkey().as_ref()],
-            &swap_intent::ID,
+            &intent_publisher::ID,
         )
     }
 
@@ -147,13 +147,13 @@ impl Context {
 
     pub fn write_route_buffer_ix(&self, route: Vec<u8>) -> Instruction {
         let (route_buffer, _) = self.route_buffer_pda();
-        let args = swap_intent::instructions::WriteRouteBufferArgs { route };
+        let args = intent_publisher::instructions::WriteRouteBufferArgs { route };
 
         let mut data = anchor_discriminator("write_route_buffer");
         data.extend_from_slice(&args.try_to_vec().unwrap());
 
         Instruction::new_with_bytes(
-            swap_intent::ID,
+            intent_publisher::ID,
             &data,
             vec![
                 AccountMeta::new(self.user.pubkey(), true),
@@ -173,7 +173,7 @@ impl Context {
         let data = anchor_discriminator("close_route_buffer");
 
         Instruction::new_with_bytes(
-            swap_intent::ID,
+            intent_publisher::ID,
             &data,
             vec![
                 AccountMeta::new(self.user.pubkey(), true),
@@ -187,7 +187,7 @@ impl Context {
         let data = anchor_discriminator("close_route_buffer");
 
         Instruction::new_with_bytes(
-            swap_intent::ID,
+            intent_publisher::ID,
             &data,
             vec![
                 AccountMeta::new(*attacker, true),
@@ -200,7 +200,7 @@ impl Context {
         let reward = self.build_reward(reward_amount);
         let (vault, vault_ata) = self.derive_vault(&route, &reward);
 
-        let args = swap_intent::instructions::CreateIntentArgs {
+        let args = intent_publisher::instructions::CreateIntentArgs {
             destination: 1,
             route,
             reward,
@@ -211,7 +211,7 @@ impl Context {
         data.extend_from_slice(&args.try_to_vec().unwrap());
 
         Instruction::new_with_bytes(
-            swap_intent::ID,
+            intent_publisher::ID,
             &data,
             self.create_intent_accounts(vault, vault_ata),
         )
@@ -225,7 +225,7 @@ impl Context {
         let reward = self.build_reward(reward_amount);
         let (vault, vault_ata) = self.derive_vault(route_for_hash, &reward);
 
-        let args = swap_intent::instructions::CreateIntentFromBufferArgs {
+        let args = intent_publisher::instructions::CreateIntentFromBufferArgs {
             destination: 1,
             reward,
             allow_partial: false,
@@ -241,7 +241,7 @@ impl Context {
         ];
         accounts.extend(self.portal_and_remaining_accounts(vault, vault_ata));
 
-        Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
+        Instruction::new_with_bytes(intent_publisher::ID, &data, accounts)
     }
 
     pub fn create_intent_from_buffer_ix_as(
@@ -262,7 +262,7 @@ impl Context {
         };
         let (vault, vault_ata) = self.derive_vault(&route, &reward);
 
-        let args = swap_intent::instructions::CreateIntentFromBufferArgs {
+        let args = intent_publisher::instructions::CreateIntentFromBufferArgs {
             destination: 1,
             reward,
             allow_partial: false,
@@ -278,7 +278,7 @@ impl Context {
         ];
         accounts.extend(self.portal_and_remaining_accounts(vault, vault_ata));
 
-        Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
+        Instruction::new_with_bytes(intent_publisher::ID, &data, accounts)
     }
 
     pub fn create_intent_ix_wrong_vault(
@@ -290,7 +290,7 @@ impl Context {
         let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
         let reward = self.build_reward(reward_amount);
 
-        let args = swap_intent::instructions::CreateIntentArgs {
+        let args = intent_publisher::instructions::CreateIntentArgs {
             destination: 1,
             route,
             reward,
@@ -301,7 +301,7 @@ impl Context {
         data.extend_from_slice(&args.try_to_vec().unwrap());
 
         Instruction::new_with_bytes(
-            swap_intent::ID,
+            intent_publisher::ID,
             &data,
             self.create_intent_accounts(dummy_vault, vault_ata),
         )
@@ -315,7 +315,7 @@ impl Context {
         let reward = self.build_reward(reward_amount);
         let (vault, vault_ata) = self.derive_vault(&route, &reward);
 
-        let args = swap_intent::instructions::CreateIntentArgs {
+        let args = intent_publisher::instructions::CreateIntentArgs {
             destination: 1,
             route,
             reward,
@@ -339,7 +339,7 @@ impl Context {
             AccountMeta::new_readonly(self.mint, false),
         ];
 
-        Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
+        Instruction::new_with_bytes(intent_publisher::ID, &data, accounts)
     }
 
     pub fn create_intent_ix_bad_remaining(
@@ -350,7 +350,7 @@ impl Context {
         let reward = self.build_reward(reward_amount);
         let (vault, vault_ata) = self.derive_vault(&route, &reward);
 
-        let args = swap_intent::instructions::CreateIntentArgs {
+        let args = intent_publisher::instructions::CreateIntentArgs {
             destination: 1,
             route,
             reward,
@@ -373,7 +373,7 @@ impl Context {
             AccountMeta::new(vault_ata, false),
         ];
 
-        Instruction::new_with_bytes(swap_intent::ID, &data, accounts)
+        Instruction::new_with_bytes(intent_publisher::ID, &data, accounts)
     }
 
     // ── Transaction senders ───────────────────────────────────────────
