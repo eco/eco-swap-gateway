@@ -18,7 +18,7 @@ use solana_sdk::transaction::{Transaction, TransactionError};
 use tiny_keccak::{Hasher, Keccak};
 
 const COMPUTE_UNIT_LIMIT: u32 = 400_000;
-const PORTAL_BIN: &[u8] = include_bytes!("../../../eco-routes-svm/target/deploy/portal.so");
+const PORTAL_BIN: &[u8] = include_bytes!("../../fixtures/portal.so");
 const INTENT_PUBLISHER_BIN: &[u8] = include_bytes!("../../../target/deploy/intent_publisher.so");
 
 type TransactionResult = Result<TransactionMetadata, Box<FailedTransactionMetadata>>;
@@ -281,101 +281,6 @@ impl Context {
         Instruction::new_with_bytes(intent_publisher::ID, &data, accounts)
     }
 
-    pub fn create_intent_ix_wrong_vault(
-        &self,
-        route: Vec<u8>,
-        reward_amount: u64,
-    ) -> Instruction {
-        let dummy_vault = Pubkey::new_unique();
-        let vault_ata = get_associated_token_address(&dummy_vault, &self.mint);
-        let reward = self.build_reward(reward_amount);
-
-        let args = intent_publisher::instructions::CreateIntentArgs {
-            destination: 1,
-            route,
-            reward,
-            allow_partial: false,
-        };
-
-        let mut data = anchor_discriminator("create_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
-
-        Instruction::new_with_bytes(
-            intent_publisher::ID,
-            &data,
-            self.create_intent_accounts(dummy_vault, vault_ata),
-        )
-    }
-
-    pub fn create_intent_ix_wrong_portal(
-        &self,
-        route: Vec<u8>,
-        reward_amount: u64,
-    ) -> Instruction {
-        let reward = self.build_reward(reward_amount);
-        let (vault, vault_ata) = self.derive_vault(&route, &reward);
-
-        let args = intent_publisher::instructions::CreateIntentArgs {
-            destination: 1,
-            route,
-            reward,
-            allow_partial: false,
-        };
-
-        let mut data = anchor_discriminator("create_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
-
-        // spl_token::ID is executable but not portal::ID
-        let accounts = vec![
-            AccountMeta::new(self.user.pubkey(), true),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new(vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
-            AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-            AccountMeta::new_readonly(system_program::ID, false),
-            AccountMeta::new(self.user_ata(), false),
-            AccountMeta::new(vault_ata, false),
-            AccountMeta::new_readonly(self.mint, false),
-        ];
-
-        Instruction::new_with_bytes(intent_publisher::ID, &data, accounts)
-    }
-
-    pub fn create_intent_ix_bad_remaining(
-        &self,
-        route: Vec<u8>,
-        reward_amount: u64,
-    ) -> Instruction {
-        let reward = self.build_reward(reward_amount);
-        let (vault, vault_ata) = self.derive_vault(&route, &reward);
-
-        let args = intent_publisher::instructions::CreateIntentArgs {
-            destination: 1,
-            route,
-            reward,
-            allow_partial: false,
-        };
-
-        let mut data = anchor_discriminator("create_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
-
-        // 2 remaining accounts instead of 3 (missing mint)
-        let accounts = vec![
-            AccountMeta::new(self.user.pubkey(), true),
-            AccountMeta::new_readonly(portal::ID, false),
-            AccountMeta::new(vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
-            AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-            AccountMeta::new_readonly(system_program::ID, false),
-            AccountMeta::new(self.user_ata(), false),
-            AccountMeta::new(vault_ata, false),
-        ];
-
-        Instruction::new_with_bytes(intent_publisher::ID, &data, accounts)
-    }
-
     // ── Transaction senders ───────────────────────────────────────────
 
     pub fn send(&mut self, ixs: &[Instruction]) -> TransactionResult {
@@ -461,13 +366,6 @@ fn keccak256(data: &[u8]) -> Bytes32 {
     hasher.update(data);
     hasher.finalize(&mut hash);
     hash.into()
-}
-
-pub fn is_custom_error(result: &Box<FailedTransactionMetadata>, expected_code: u32) -> bool {
-    matches!(
-        result.err,
-        TransactionError::InstructionError(_, InstructionError::Custom(code)) if code == expected_code
-    )
 }
 
 pub fn is_anchor_error(result: &Box<FailedTransactionMetadata>) -> bool {

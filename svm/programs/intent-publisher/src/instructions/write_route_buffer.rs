@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 
+use crate::events::RouteBufferCreated;
 use crate::state::{RouteBuffer, ROUTE_BUFFER_SEED};
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
@@ -31,6 +32,8 @@ pub fn write_route_buffer(
     let route_buffer = &mut ctx.accounts.route_buffer;
     route_buffer.user = ctx.accounts.user.key();
     route_buffer.route_data = args.route;
+
+    emit!(RouteBufferCreated::new(ctx.accounts.user.key()));
 
     Ok(())
 }

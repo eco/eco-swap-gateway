@@ -9,3 +9,15 @@ pub struct IntentCreated {
     pub user: Pubkey,
     pub destination: u64,
 }
+
+#[event]
+#[derive(new)]
+pub struct RouteBufferCreated {
+    pub user: Pubkey,
+}
+
+#[event]
+#[derive(new)]
+pub struct RouteBufferClosed {
+    pub user: Pubkey,
+}

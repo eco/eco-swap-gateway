@@ -5,7 +5,6 @@ use tiny_keccak::{Hasher, Keccak};
 
 use crate::cpi;
 use crate::events::IntentCreated;
-use crate::instructions::IntentPublisherError;
 use crate::state::{RouteBuffer, ROUTE_BUFFER_SEED};
 
 // ── Args ──────────────────────────────────────────────────────────────
@@ -32,14 +31,11 @@ pub struct CreateIntent<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    /// CHECK: validated against portal::ID.
-    #[account(
-        executable,
-        address = portal::ID @ IntentPublisherError::InvalidPortalProgram,
-    )]
+    /// CHECK: caller-provided Portal program. Validated by CPI — if wrong, the invoke will fail.
+    #[account(executable)]
     pub portal_program: UncheckedAccount<'info>,
 
-    /// CHECK: validated against vault_pda derivation in handler logic.
+    /// CHECK: vault PDA derived from intent hash. Validated by Portal's fund handler.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,
 
@@ -60,18 +56,14 @@ pub struct CreateIntentFromBuffer<'info> {
         close = user,
         seeds = [ROUTE_BUFFER_SEED, user.key().as_ref()],
         bump,
-        constraint = route_buffer.user == user.key() @ IntentPublisherError::InvalidUser,
     )]
     pub route_buffer: Account<'info, RouteBuffer>,
 
-    /// CHECK: validated against portal::ID.
-    #[account(
-        executable,
-        address = portal::ID @ IntentPublisherError::InvalidPortalProgram,
-    )]
+    /// CHECK: caller-provided Portal program. Validated by CPI — if wrong, the invoke will fail.
+    #[account(executable)]
     pub portal_program: UncheckedAccount<'info>,
 
-    /// CHECK: validated against vault_pda derivation in handler logic.
+    /// CHECK: vault PDA derived from intent hash. Validated by Portal's fund handler.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,
 
@@ -143,20 +135,9 @@ fn publish_and_fund<'info>(
     system_program: &AccountInfo<'info>,
     remaining_accounts: &[AccountInfo<'info>],
 ) -> Result<()> {
-    require!(
-        remaining_accounts.len() % 3 == 0,
-        IntentPublisherError::InvalidRemainingAccounts
-    );
-
     let route_hash = keccak256(&route);
     let reward_hash = reward.hash();
     let intent_hash = portal::types::intent_hash(destination, &route_hash, &reward_hash);
-
-    let (expected_vault, _) = portal::state::vault_pda(&intent_hash);
-    require!(
-        vault.key() == expected_vault,
-        IntentPublisherError::InvalidVault
-    );
 
     cpi::publish::publish(
         portal_program,

@@ -9,6 +9,10 @@ pub fn route_buffer_pda(user: &Pubkey) -> (Pubkey, u8) {
 /// Pre-populated buffer storing an already-encoded route.
 /// Created in a setup transaction for large routes that don't fit in instruction data.
 /// Consumed and closed by `create_intent_from_buffer`.
+///
+/// Max route size is 1024 bytes. Typical ABI-encoded routes are ~608 bytes.
+/// Solana tx limit is 1232 bytes, so routes above ~400 bytes (after accounting
+/// for accounts, signatures, and other instruction data) need the buffer path.
 #[account]
 #[derive(InitSpace)]
 pub struct RouteBuffer {
