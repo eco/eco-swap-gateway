@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
 
 pub const ROUTE_BUFFER_SEED: &[u8] = b"route_buffer";
+pub const MAX_ROUTE_LEN: usize = 1024;
 
 pub fn route_buffer_pda(user: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[ROUTE_BUFFER_SEED, user.as_ref()], &crate::ID)
@@ -17,7 +18,7 @@ pub fn route_buffer_pda(user: &Pubkey) -> (Pubkey, u8) {
 #[derive(InitSpace)]
 pub struct RouteBuffer {
     pub user: Pubkey,
-    #[max_len(1024)]
+    #[max_len(MAX_ROUTE_LEN)]
     pub route_data: Vec<u8>,
 }
 

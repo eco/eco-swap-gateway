@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
 
 use crate::events::RouteBufferCreated;
-use crate::state::{RouteBuffer, ROUTE_BUFFER_SEED};
+use crate::instructions::IntentPublisherError;
+use crate::state::{RouteBuffer, MAX_ROUTE_LEN, ROUTE_BUFFER_SEED};
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct WriteRouteBufferArgs {
@@ -29,6 +30,11 @@ pub fn write_route_buffer(
     ctx: Context<WriteRouteBuffer>,
     args: WriteRouteBufferArgs,
 ) -> Result<()> {
+    require!(
+        args.route.len() <= MAX_ROUTE_LEN,
+        IntentPublisherError::RouteTooLong
+    );
+
     let route_buffer = &mut ctx.accounts.route_buffer;
     route_buffer.user = ctx.accounts.user.key();
     route_buffer.route_data = args.route;
