@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Call, Reward, TokenAmount} from "eco-routes/contracts/types/Intent.sol";
@@ -10,7 +10,7 @@ import {IIntentSource} from "eco-routes/contracts/interfaces/IIntentSource.sol";
 import {TestERC20} from "eco-routes/contracts/test/TestERC20.sol";
 
 import {SwapIntent} from "../contracts/SwapIntent.sol";
-import {ISwapIntent, IntentParams} from "../contracts/interfaces/ISwapIntent.sol";
+import {ISwapIntent, IntentParams, RouteType} from "../contracts/interfaces/ISwapIntent.sol";
 import {MockDEX, ReentrantDEX} from "./mocks/MockDEX.sol";
 
 contract SwapIntentTest is Test {
@@ -72,11 +72,12 @@ contract SwapIntentTest is Test {
             rewardCreator: user,
             rewardProver: prover,
             flatFee: 5_000,
-            scalarNum: 997,
-            scalarDenom: 1000,
+            feeNumerator: 997,
+            feeDenominator: 1000,
             sourceDecimals: 18,
             destinationDecimals: 18,
-            allowPartial: false
+            allowPartial: false,
+            routeType: RouteType.EVM
         });
     }
 
@@ -113,7 +114,7 @@ contract SwapIntentTest is Test {
     // ─── Constructor ──────────────────────────────────────────────
 
     function test_constructor_setsPortal() public view {
-        assertEq(address(swapIntent.portal()), address(portal));
+        assertEq(address(swapIntent.PORTAL()), address(portal));
     }
 
     function test_revert_constructor_zeroAddress() public {
@@ -134,14 +135,13 @@ contract SwapIntentTest is Test {
     }
 
     function test_emitsIntentCreated() public {
-        // swapOutput = 1_000_000, routeAmount = 1_000_000 * 997/1000 - 5000 = 992_000
         IntentParams memory intent = _defaultIntentParams();
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
 
         vm.expectEmit(false, true, false, true);
-        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, 992_000, 1);
+        emit ISwapIntent.IntentCreated(bytes32(0), user, SWAP_AMOUNT);
 
         swapIntent.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
@@ -155,15 +155,15 @@ contract SwapIntentTest is Test {
         inputToken.mint(user, amount);
 
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 995;
-        intent.scalarDenom = 1000;
+        intent.feeNumerator = 995;
+        intent.feeDenominator = 1000;
         intent.flatFee = 10_000;
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), amount);
 
         vm.expectEmit(false, true, false, true);
-        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), amount, 1_980_000, 1);
+        emit ISwapIntent.IntentCreated(bytes32(0), user, amount);
 
         swapIntent.swapAndCreateIntent(
             address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent, 0, user
@@ -173,15 +173,15 @@ contract SwapIntentTest is Test {
 
     function test_noFee() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
 
         vm.expectEmit(false, true, false, true);
-        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, SWAP_AMOUNT, 1);
+        emit ISwapIntent.IntentCreated(bytes32(0), user, SWAP_AMOUNT);
 
         swapIntent.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
@@ -205,18 +205,75 @@ contract SwapIntentTest is Test {
         assertTrue(intentHash != bytes32(0));
     }
 
-    function test_zeroInputAmount_skipsTransferFrom() public {
-        // Pre-fund the contract with input tokens instead of pulling.
-        inputToken.mint(address(swapIntent), SWAP_AMOUNT);
+    // ─── Input validation ────────────────────────────────────────
 
+    function test_revert_zeroInputAmount() public {
         IntentParams memory intent = _defaultIntentParams();
         Call[] memory calls = _buildSwapCalls(SWAP_AMOUNT);
 
-        vm.prank(user);
-        bytes32 intentHash = swapIntent.swapAndCreateIntent(
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.InvalidInputAmount.selector);
+        swapIntent.swapAndCreateIntent(
             address(inputToken), 0, address(outputToken), calls, intent, 0, user
         );
-        assertTrue(intentHash != bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_revert_invalidSweepRecipient_zero() public {
+        IntentParams memory intent = _defaultIntentParams();
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.InvalidSweepRecipient.selector);
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, address(0)
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_invalidSweepRecipient_self() public {
+        IntentParams memory intent = _defaultIntentParams();
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.InvalidSweepRecipient.selector);
+        swapIntent.swapAndCreateIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            intent,
+            0,
+            address(swapIntent)
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_invalidRewardCreator() public {
+        IntentParams memory intent = _defaultIntentParams();
+        intent.rewardCreator = address(0);
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.InvalidRewardCreator.selector);
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_invalidRewardProver() public {
+        IntentParams memory intent = _defaultIntentParams();
+        intent.rewardProver = address(0);
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.InvalidRewardProver.selector);
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
+        );
+        vm.stopPrank();
     }
 
     // ─── Token & balance assertions ───────────────────────────────
@@ -230,6 +287,13 @@ contract SwapIntentTest is Test {
     function test_portalApprovalResetToZero() public {
         _doSwap();
         assertEq(outputToken.allowance(address(swapIntent), address(portal)), 0);
+    }
+
+    function test_inputTokenApprovalResetToZero() public {
+        _doSwap();
+        // Approval for each swap call target should be zeroed.
+        assertEq(inputToken.allowance(address(swapIntent), address(inputToken)), 0);
+        assertEq(inputToken.allowance(address(swapIntent), address(dex)), 0);
     }
 
     function test_userBalancesAfterSwap() public {
@@ -248,22 +312,34 @@ contract SwapIntentTest is Test {
         assertEq(inputToken.balanceOf(user), userInputBefore - SWAP_AMOUNT);
     }
 
+    function test_sweepsETH() public {
+        vm.deal(user, 1 ether);
+        IntentParams memory intent = _defaultIntentParams();
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        swapIntent.swapAndCreateIntent{value: 1 ether}(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
+        );
+        vm.stopPrank();
+
+        assertEq(address(swapIntent).balance, 0);
+        assertEq(user.balance, 1 ether);
+    }
+
     // ─── Custom reward amount ────────────────────────────────────
 
     function test_customRewardAmount() public {
-        // swapOutput = 1_000_000, custom reward = 800_000 → 200_000 swept to user
         uint256 customReward = 800_000;
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent, customReward);
         assertTrue(intentHash != bytes32(0));
 
-        // Contract is empty
         assertEq(outputToken.balanceOf(address(swapIntent)), 0);
-        // Excess swept to user: swapOutput - customReward = 200_000
         assertEq(outputToken.balanceOf(user), SWAP_AMOUNT - customReward);
     }
 
@@ -271,14 +347,20 @@ contract SwapIntentTest is Test {
         address recipient = makeAddr("recipient");
         uint256 customReward = 600_000;
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
         swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, customReward, recipient
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            intent,
+            customReward,
+            recipient
         );
         vm.stopPrank();
 
@@ -288,10 +370,9 @@ contract SwapIntentTest is Test {
     }
 
     function test_zeroRewardAmount_usesFullSwapOutput() public {
-        // rewardAmount = 0 → use swapOutput, no output tokens swept
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         _doSwap(SWAP_AMOUNT, intent, 0);
@@ -301,8 +382,8 @@ contract SwapIntentTest is Test {
 
     function test_revert_rewardExceedsSwapOutput() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         vm.startPrank(user);
@@ -318,8 +399,8 @@ contract SwapIntentTest is Test {
 
     function test_integration_portalIntentIsFunded() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
@@ -330,8 +411,8 @@ contract SwapIntentTest is Test {
 
     function test_integration_vaultHoldsSwapOutput() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         bytes memory route = _buildRouteTemplate();
@@ -351,8 +432,8 @@ contract SwapIntentTest is Test {
     function test_integration_rewardStructCorrectness() public {
         IntentParams memory intent = _defaultIntentParams();
         intent.destination = 42;
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
@@ -378,8 +459,8 @@ contract SwapIntentTest is Test {
 
     function test_integration_routePatchCorrectness() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
@@ -412,10 +493,9 @@ contract SwapIntentTest is Test {
     }
 
     function test_integration_defaultReward_vaultHoldsFullSwapOutput() public {
-        // rewardAmount = 0 → vault gets full swapOutput
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         bytes memory route = _buildRouteTemplate();
@@ -434,11 +514,10 @@ contract SwapIntentTest is Test {
     }
 
     function test_integration_customReward_vaultHoldsPartial() public {
-        // rewardAmount = 800_000, swapOutput = 1_000_000 → vault gets 800k, user swept 200k
         uint256 customReward = 800_000;
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
 
         bytes memory route = _buildRouteTemplate();
@@ -447,7 +526,6 @@ contract SwapIntentTest is Test {
             mstore(add(add(route, 0x20), 96), SWAP_AMOUNT)
         }
 
-        // Reward uses customReward, not swapOutput
         TokenAmount[] memory tokens = new TokenAmount[](1);
         tokens[0] = TokenAmount({token: address(outputToken), amount: customReward});
         Reward memory reward = Reward({
@@ -461,7 +539,6 @@ contract SwapIntentTest is Test {
 
         _doSwap(SWAP_AMOUNT, intent, customReward);
 
-        // Vault holds customReward, user gets the difference
         assertEq(outputToken.balanceOf(vault), customReward);
         assertEq(outputToken.balanceOf(user), SWAP_AMOUNT - customReward);
         assertEq(outputToken.balanceOf(address(swapIntent)), 0);
@@ -495,6 +572,7 @@ contract SwapIntentTest is Test {
     // ─── Call target validation ───────────────────────────────────
 
     function test_revert_selfCall() public {
+        // Self-calls fail via CallFailed wrapping ReentrancyGuardReentrantCall.
         Call[] memory calls = new Call[](1);
         calls[0] = Call({
             target: address(swapIntent),
@@ -505,7 +583,7 @@ contract SwapIntentTest is Test {
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
-        vm.expectRevert(abi.encodeWithSelector(ISwapIntent.InvalidCallTarget.selector, address(swapIntent)));
+        vm.expectRevert();
         swapIntent.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
@@ -537,13 +615,13 @@ contract SwapIntentTest is Test {
             data: abi.encodeWithSelector(IERC20.approve.selector, address(dex), SWAP_AMOUNT),
             value: 0
         });
-        calls[1] = Call({target: address(swapIntent), data: "", value: 0});
+        calls[1] = Call({target: address(portal), data: "", value: 0});
 
         IntentParams memory intent = _defaultIntentParams();
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
-        vm.expectRevert(abi.encodeWithSelector(ISwapIntent.InvalidCallTarget.selector, address(swapIntent)));
+        vm.expectRevert(abi.encodeWithSelector(ISwapIntent.InvalidCallTarget.selector, address(portal)));
         swapIntent.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, 0, user
         );
@@ -610,7 +688,7 @@ contract SwapIntentTest is Test {
 
     function test_revert_zeroDenom() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarDenom = 0;
+        intent.feeDenominator = 0;
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
@@ -623,7 +701,7 @@ contract SwapIntentTest is Test {
 
     function test_revert_zeroNum() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 0;
+        intent.feeNumerator = 0;
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
@@ -636,8 +714,8 @@ contract SwapIntentTest is Test {
 
     function test_revert_numGreaterThanDenom() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1001;
-        intent.scalarDenom = 1000;
+        intent.feeNumerator = 1001;
+        intent.feeDenominator = 1000;
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
@@ -654,8 +732,8 @@ contract SwapIntentTest is Test {
         dex.setRate(0);
         IntentParams memory intent = _defaultIntentParams();
         intent.flatFee = 0;
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
@@ -668,8 +746,8 @@ contract SwapIntentTest is Test {
 
     function test_revert_routeAmountZero() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = SWAP_AMOUNT;
 
         vm.startPrank(user);
@@ -726,88 +804,83 @@ contract SwapIntentTest is Test {
     // ─── Decimal conversion ─────────────────────────────────────────
 
     function test_decimalConversion_sourceGreaterThanDest() public {
-        // 18 → 6 decimals (e.g., USDC BSC → USDC Base)
-        // swapOutput = 1_000_000 (in 18-dec units), no fees
-        // routeAmount should be 1_000_000 / 10^12 = 0.000001 in 6-dec = 1 (truncated to 0!)
-        // Use a larger amount: 1e18 worth of swap output
-        // swapOutput = 1_000_000, routeAmount = 1_000_000 / 1e12 = 0 → too small
-        // Need a swap output large enough: 1e12 min for 1 unit in 6-dec
-        uint256 amount = 2_000_000_000_000; // 2e12
+        // 18 → 6 decimals: routeAmount = 2e12 / 1e12 = 2
+        uint256 amount = 2_000_000_000_000;
         inputToken.mint(user, amount);
         outputToken.mint(address(dex), amount);
 
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 18;
         intent.destinationDecimals = 6;
 
-        vm.startPrank(user);
-        inputToken.approve(address(swapIntent), amount);
+        bytes32 intentHash = _doSwap(amount, intent);
 
-        // routeAmount = 2e12 / 1e12 = 2 (in 6-decimal units)
-        vm.expectEmit(false, true, false, true);
-        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), amount, 2, 1);
-
-        swapIntent.swapAndCreateIntent(
-            address(inputToken), amount, address(outputToken), _buildSwapCalls(amount), intent, 0, user
-        );
-        vm.stopPrank();
+        // Verify routeAmount via intent hash
+        bytes memory expectedRoute = _buildRouteTemplate();
+        uint256 expectedRouteAmount = 2;
+        assembly {
+            mstore(add(add(expectedRoute, 0x20), 32), expectedRouteAmount)
+            mstore(add(add(expectedRoute, 0x20), 96), expectedRouteAmount)
+        }
+        Reward memory reward = _buildReward(amount);
+        (bytes32 expectedHash,,) = portal.getIntentHash(uint64(1), expectedRoute, reward);
+        assertEq(intentHash, expectedHash);
     }
 
     function test_decimalConversion_destGreaterThanSource() public {
-        // 6 → 18 decimals
+        // 6 → 18 decimals: routeAmount = 1_000_000 * 1e12 = 1e18
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 6;
         intent.destinationDecimals = 18;
 
-        vm.startPrank(user);
-        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
 
-        // routeAmount = 1_000_000 * 1e12 = 1e18
-        vm.expectEmit(false, true, false, true);
-        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, 1_000_000_000_000_000_000, 1);
-
-        swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
-        );
-        vm.stopPrank();
+        bytes memory expectedRoute = _buildRouteTemplate();
+        uint256 expectedRouteAmount = 1_000_000_000_000_000_000;
+        assembly {
+            mstore(add(add(expectedRoute, 0x20), 32), expectedRouteAmount)
+            mstore(add(add(expectedRoute, 0x20), 96), expectedRouteAmount)
+        }
+        Reward memory reward = _buildReward(SWAP_AMOUNT);
+        (bytes32 expectedHash,,) = portal.getIntentHash(uint64(1), expectedRoute, reward);
+        assertEq(intentHash, expectedHash);
     }
 
     function test_decimalConversion_sameDecimals() public {
-        // 18 → 18: no conversion, routeAmount == netAmount
+        // 18 → 18: routeAmount == SWAP_AMOUNT
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 18;
         intent.destinationDecimals = 18;
 
-        vm.startPrank(user);
-        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
 
-        vm.expectEmit(false, true, false, true);
-        emit ISwapIntent.IntentCreated(bytes32(0), user, address(outputToken), SWAP_AMOUNT, SWAP_AMOUNT, 1);
-
-        swapIntent.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
-        );
-        vm.stopPrank();
+        bytes memory expectedRoute = _buildRouteTemplate();
+        assembly {
+            mstore(add(add(expectedRoute, 0x20), 32), SWAP_AMOUNT)
+            mstore(add(add(expectedRoute, 0x20), 96), SWAP_AMOUNT)
+        }
+        Reward memory reward = _buildReward(SWAP_AMOUNT);
+        (bytes32 expectedHash,,) = portal.getIntentHash(uint64(1), expectedRoute, reward);
+        assertEq(intentHash, expectedHash);
     }
 
     function test_revert_decimalConversion_truncatesToZero() public {
         // 18 → 6 with tiny swapOutput: routeAmount truncates to 0
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = 1;
-        intent.scalarDenom = 1;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 18;
         intent.destinationDecimals = 6;
-        // SWAP_AMOUNT = 1_000_000, divided by 1e12 = 0 → RouteAmountZero
 
         vm.startPrank(user);
         inputToken.approve(address(swapIntent), SWAP_AMOUNT);
@@ -818,41 +891,144 @@ contract SwapIntentTest is Test {
         vm.stopPrank();
     }
 
+    // ─── SVM route patching ──────────────────────────────────────
+
+    function test_svmRoutePatch() public {
+        // SVM routes use u64 little-endian (8 bytes) instead of uint256 (32 bytes).
+        // Build a smaller template where offsets point to 8-byte slots.
+        bytes memory svmTemplate = new bytes(32);
+        IntentParams memory intent = _defaultIntentParams();
+        intent.routeTemplate = svmTemplate;
+        intent.tokensAmountOffset = 0;
+        intent.calldataAmountOffset = 16;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
+        intent.flatFee = 0;
+        intent.routeType = RouteType.SVM;
+
+        bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
+        assertTrue(intentHash != bytes32(0));
+    }
+
+    function test_svmRoutePatch_skipCalldata() public {
+        bytes memory svmTemplate = new bytes(16);
+        IntentParams memory intent = _defaultIntentParams();
+        intent.routeTemplate = svmTemplate;
+        intent.tokensAmountOffset = 0;
+        intent.calldataAmountOffset = type(uint32).max;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
+        intent.flatFee = 0;
+        intent.routeType = RouteType.SVM;
+
+        bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
+        assertTrue(intentHash != bytes32(0));
+    }
+
+    function test_revert_svmAmountOverflowU64() public {
+        // Force a routeAmount > type(uint64).max via large swap output + decimal upscaling
+        uint256 largeAmount = 2_000_000_000_000_000_000; // 2e18
+        inputToken.mint(user, largeAmount);
+        outputToken.mint(address(dex), largeAmount);
+
+        bytes memory svmTemplate = new bytes(32);
+        IntentParams memory intent = _defaultIntentParams();
+        intent.routeTemplate = svmTemplate;
+        intent.tokensAmountOffset = 0;
+        intent.calldataAmountOffset = type(uint32).max;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
+        intent.flatFee = 0;
+        intent.sourceDecimals = 6;
+        intent.destinationDecimals = 18;
+        intent.routeType = RouteType.SVM;
+        // routeAmount = 2e18 * 1e12 = 2e30, which overflows u64
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), largeAmount);
+        vm.expectRevert(ISwapIntent.AmountOverflowU64.selector);
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), largeAmount, address(outputToken), _buildSwapCalls(largeAmount), intent, 0, user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_svmOffsetOutOfBounds() public {
+        bytes memory svmTemplate = new bytes(4); // too small for 8-byte patch
+        IntentParams memory intent = _defaultIntentParams();
+        intent.routeTemplate = svmTemplate;
+        intent.tokensAmountOffset = 0;
+        intent.calldataAmountOffset = type(uint32).max;
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
+        intent.flatFee = 0;
+        intent.routeType = RouteType.SVM;
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.OffsetOutOfBounds.selector);
+        swapIntent.swapAndCreateIntent(
+            address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, 0, user
+        );
+        vm.stopPrank();
+    }
+
+    // ─── ETH sweep failures ──────────────────────────────────────
+
+    function test_revert_nativeTransferFailed() public {
+        // Use a contract that rejects ETH as sweepRecipient
+        ETHRejecter rejecter = new ETHRejecter();
+        vm.deal(user, 1 ether);
+        IntentParams memory intent = _defaultIntentParams();
+
+        vm.startPrank(user);
+        inputToken.approve(address(swapIntent), SWAP_AMOUNT);
+        vm.expectRevert(ISwapIntent.NativeTransferFailed.selector);
+        swapIntent.swapAndCreateIntent{value: 1 ether}(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            intent,
+            0,
+            address(rejecter)
+        );
+        vm.stopPrank();
+    }
+
     // ─── Fuzz tests ───────────────────────────────────────────────
 
     function testFuzz_feeCalculation(
         uint128 swapOutput,
-        uint128 scalarNum,
-        uint128 scalarDenom,
+        uint128 feeNumerator,
+        uint128 feeDenominator,
         uint128 flatFee
     ) public {
         vm.assume(swapOutput > 0);
-        vm.assume(scalarDenom > 0);
-        vm.assume(scalarNum > 0 && scalarNum <= scalarDenom);
+        vm.assume(feeDenominator > 0);
+        vm.assume(feeNumerator > 0 && feeNumerator <= feeDenominator);
 
-        uint256 scaled = (uint256(swapOutput) * uint256(scalarNum)) / uint256(scalarDenom);
-        vm.assume(flatFee < scaled);
-        uint256 expectedRouteAmount = scaled - uint256(flatFee);
+        uint256 afterFees = (uint256(swapOutput) * uint256(feeNumerator)) / uint256(feeDenominator);
+        vm.assume(flatFee < afterFees);
+        uint256 expectedRouteAmount = afterFees - uint256(flatFee);
         vm.assume(expectedRouteAmount > 0);
 
-        // Configure DEX to output exactly swapOutput for a fixed input.
         uint256 inputAmount = 1_000_000;
         uint256 dexRate = (uint256(swapOutput) * 1e18) / inputAmount;
         vm.assume(dexRate > 0);
         uint256 actualOutput = (inputAmount * dexRate) / 1e18;
         vm.assume(actualOutput == swapOutput && actualOutput > 0);
 
-        // Recalculate with actual output to ensure consistency.
-        uint256 actualScaled = (actualOutput * uint256(scalarNum)) / uint256(scalarDenom);
-        vm.assume(uint256(flatFee) < actualScaled);
+        uint256 actualAfterFees = (actualOutput * uint256(feeNumerator)) / uint256(feeDenominator);
+        vm.assume(uint256(flatFee) < actualAfterFees);
 
         dex.setRate(dexRate);
         inputToken.mint(user, inputAmount);
         outputToken.mint(address(dex), actualOutput);
 
         IntentParams memory intent = _defaultIntentParams();
-        intent.scalarNum = uint256(scalarNum);
-        intent.scalarDenom = uint256(scalarDenom);
+        intent.feeNumerator = uint256(feeNumerator);
+        intent.feeDenominator = uint256(feeDenominator);
         intent.flatFee = uint256(flatFee);
 
         vm.startPrank(user);
@@ -866,3 +1042,6 @@ contract SwapIntentTest is Test {
         assertEq(inputToken.balanceOf(address(swapIntent)), 0);
     }
 }
+
+/// @notice Helper contract that rejects ETH transfers (no receive/fallback).
+contract ETHRejecter {}

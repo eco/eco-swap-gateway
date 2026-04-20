@@ -7,14 +7,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 import {Call, Reward, TokenAmount} from "eco-routes/contracts/types/Intent.sol";
 import {IIntentSource} from "eco-routes/contracts/interfaces/IIntentSource.sol";
+import {Endian} from "eco-routes/contracts/libs/Endian.sol";
 
-import {ISwapIntent, IntentParams} from "./interfaces/ISwapIntent.sol";
+import {ISwapIntent, IntentParams, RouteType} from "./interfaces/ISwapIntent.sol";
 
 /// @title SwapIntent
 /// @notice Atomically swaps tokens via arbitrary DEX calls and creates a Portal
 ///         intent. The reward amount defaults to the full swap output, or can be
-///         set explicitly (useful for custom route calls where the user keeps some output).
+///         set explicitly (useful for any-to-any flows where the user splits the
+///         swap output across multiple intents).
 /// @dev Does not support fee-on-transfer tokens as outputToken.
+///      Supports both EVM and SVM destination routes via RouteType.
 contract SwapIntent is ISwapIntent, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -22,37 +25,47 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
     uint32 public constant SKIP_CALLDATA_PATCH = type(uint32).max;
 
     /// @notice The Portal contract used to publish and fund intents.
-    IIntentSource public immutable portal;
+    IIntentSource public immutable PORTAL;
 
     constructor(address _portal) {
         if (_portal == address(0) || _portal.code.length == 0) {
             revert InvalidPortal();
         }
-        portal = IIntentSource(_portal);
+        PORTAL = IIntentSource(_portal);
     }
+
+    /// @dev Accepts ETH refunds from DEX routers during multi-hop swaps.
+    receive() external payable {}
 
     /// @inheritdoc ISwapIntent
     function swapAndCreateIntent(
         address inputToken,
         uint256 inputAmount,
         address outputToken,
-        Call[] calldata calls,
+        Call[] calldata swapCalls,
         IntentParams calldata intent,
         uint256 rewardAmount,
         address sweepRecipient
-    ) external nonReentrant returns (bytes32 intentHash) {
-        // 1. Validate scalar parameters.
-        if (intent.scalarDenom == 0 || intent.scalarNum == 0 || intent.scalarNum > intent.scalarDenom) {
+    ) external payable nonReentrant returns (bytes32 intentHash) {
+        // 1. Validate parameters.
+        if (sweepRecipient == address(0) || sweepRecipient == address(this)) {
+            revert InvalidSweepRecipient();
+        }
+        if (intent.rewardCreator == address(0)) revert InvalidRewardCreator();
+        if (intent.rewardProver == address(0)) revert InvalidRewardProver();
+        if (intent.feeDenominator == 0 || intent.feeNumerator == 0 || intent.feeNumerator > intent.feeDenominator) {
             revert InvalidScalar();
         }
 
         // 2. Pull input tokens and execute swap.
-        uint256 swapOutput = _executeSwap(inputToken, inputAmount, outputToken, calls);
+        uint256 swapOutput = _executeSwap(inputToken, inputAmount, outputToken, swapCalls);
 
         // 3. Calculate route amount and patch route template.
-        (uint256 routeAmount, bytes memory route) = _buildRoute(swapOutput, intent);
+        bytes memory route = _buildRoute(swapOutput, intent);
 
         // 4. Resolve reward amount: 0 means use full swapOutput.
+        //    For any-to-any flows, set explicitly so the excess can be
+        //    swept and used to fund a second intent.
         uint256 actualReward = rewardAmount == 0 ? swapOutput : rewardAmount;
         if (actualReward > swapOutput) revert RewardExceedsSwapOutput();
 
@@ -60,12 +73,16 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         intentHash = _publishAndFund(outputToken, actualReward, route, intent);
 
         // 6. Emit event.
-        emit IntentCreated(intentHash, msg.sender, outputToken, swapOutput, routeAmount, intent.destination);
+        emit IntentCreated(intentHash, msg.sender, swapOutput);
 
-        // 7. Cleanup: reset approval, sweep residual tokens.
-        IERC20(outputToken).forceApprove(address(portal), 0);
+        // 7. Cleanup: reset approvals, sweep residual tokens and ETH.
+        IERC20(outputToken).forceApprove(address(PORTAL), 0);
+        for (uint256 i; i < swapCalls.length; ++i) {
+            IERC20(inputToken).forceApprove(swapCalls[i].target, 0);
+        }
         _sweepToken(inputToken, sweepRecipient);
         _sweepToken(outputToken, sweepRecipient);
+        _sweepETH(sweepRecipient);
     }
 
     // --- Internal helpers ---
@@ -74,20 +91,19 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         address inputToken,
         uint256 inputAmount,
         address outputToken,
-        Call[] calldata calls
+        Call[] calldata swapCalls
     ) internal returns (uint256 swapOutput) {
-        if (inputAmount > 0) {
-            IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
-        }
+        if (inputAmount == 0) revert InvalidInputAmount();
+        IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
 
         uint256 preBalance = IERC20(outputToken).balanceOf(address(this));
 
-        for (uint256 i; i < calls.length; ++i) {
-            if (calls[i].target == address(this) || calls[i].target == address(portal)) {
-                revert InvalidCallTarget(calls[i].target);
+        for (uint256 i; i < swapCalls.length; ++i) {
+            if (swapCalls[i].target == address(PORTAL)) {
+                revert InvalidCallTarget(swapCalls[i].target);
             }
             (bool success, bytes memory returnData) =
-                calls[i].target.call{value: calls[i].value}(calls[i].data);
+                swapCalls[i].target.call{value: swapCalls[i].value}(swapCalls[i].data);
             if (!success) revert CallFailed(i, returnData);
         }
 
@@ -98,11 +114,11 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
     function _buildRoute(uint256 swapOutput, IntentParams calldata intent)
         internal
         pure
-        returns (uint256 routeAmount, bytes memory route)
+        returns (bytes memory route)
     {
-        uint256 scaled = (swapOutput * intent.scalarNum) / intent.scalarDenom;
-        if (scaled <= intent.flatFee) revert RouteAmountZero();
-        routeAmount = scaled - intent.flatFee;
+        uint256 afterFees = (swapOutput * intent.feeNumerator) / intent.feeDenominator;
+        if (afterFees <= intent.flatFee) revert RouteAmountZero();
+        uint256 routeAmount = afterFees - intent.flatFee;
 
         if (intent.sourceDecimals > intent.destinationDecimals) {
             routeAmount = routeAmount / (10 ** (intent.sourceDecimals - intent.destinationDecimals));
@@ -111,7 +127,9 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         }
         if (routeAmount == 0) revert RouteAmountZero();
 
-        route = _patchRoute(intent.routeTemplate, intent.tokensAmountOffset, intent.calldataAmountOffset, routeAmount);
+        route = _patchRoute(
+            intent.routeTemplate, intent.tokensAmountOffset, intent.calldataAmountOffset, routeAmount, intent.routeType
+        );
     }
 
     function _publishAndFund(
@@ -130,19 +148,28 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
             tokens: tokens
         });
 
-        IERC20(outputToken).forceApprove(address(portal), actualReward);
-        (intentHash,) = portal.publishAndFund(intent.destination, route, reward, intent.allowPartial);
+        IERC20(outputToken).forceApprove(address(PORTAL), actualReward);
+        (intentHash,) = PORTAL.publishAndFund(intent.destination, route, reward, intent.allowPartial);
     }
 
-    function _patchRoute(bytes calldata template, uint32 tokensOffset, uint32 calldataOffset, uint256 value)
-        internal
-        pure
-        returns (bytes memory route)
-    {
+    function _patchRoute(
+        bytes calldata template,
+        uint32 tokensOffset,
+        uint32 calldataOffset,
+        uint256 value,
+        RouteType routeType
+    ) internal pure returns (bytes memory route) {
         route = bytes(template);
-        _patchUint256(route, tokensOffset, value);
-        if (calldataOffset != SKIP_CALLDATA_PATCH) {
-            _patchUint256(route, calldataOffset, value);
+        if (routeType == RouteType.SVM) {
+            _patchU64LE(route, tokensOffset, value);
+            if (calldataOffset != SKIP_CALLDATA_PATCH) {
+                _patchU64LE(route, calldataOffset, value);
+            }
+        } else {
+            _patchUint256(route, tokensOffset, value);
+            if (calldataOffset != SKIP_CALLDATA_PATCH) {
+                _patchUint256(route, calldataOffset, value);
+            }
         }
     }
 
@@ -153,10 +180,27 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
         }
     }
 
+    function _patchU64LE(bytes memory data, uint32 offset, uint256 value) internal pure {
+        if (value > type(uint64).max) revert AmountOverflowU64();
+        if (uint256(offset) + 8 > data.length) revert OffsetOutOfBounds();
+        bytes8 leValue = Endian.toLittleEndian64(uint64(value));
+        for (uint256 i; i < 8; ++i) {
+            data[offset + i] = leValue[i];
+        }
+    }
+
     function _sweepToken(address token, address to) internal {
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (balance > 0) {
             IERC20(token).safeTransfer(to, balance);
+        }
+    }
+
+    function _sweepETH(address to) internal {
+        uint256 balance = address(this).balance;
+        if (balance > 0) {
+            (bool ok,) = to.call{value: balance}("");
+            if (!ok) revert NativeTransferFailed();
         }
     }
 }

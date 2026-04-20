@@ -7,7 +7,7 @@ export const swapIntentAbi = [
       { name: "inputAmount", type: "uint256" },
       { name: "outputToken", type: "address" },
       {
-        name: "calls",
+        name: "swapCalls",
         type: "tuple[]",
         components: [
           { name: "target", type: "address" },
@@ -27,18 +27,19 @@ export const swapIntentAbi = [
           { name: "rewardCreator", type: "address" },
           { name: "rewardProver", type: "address" },
           { name: "flatFee", type: "uint256" },
-          { name: "scalarNum", type: "uint256" },
-          { name: "scalarDenom", type: "uint256" },
+          { name: "feeNumerator", type: "uint256" },
+          { name: "feeDenominator", type: "uint256" },
           { name: "sourceDecimals", type: "uint8" },
           { name: "destinationDecimals", type: "uint8" },
           { name: "allowPartial", type: "bool" },
+          { name: "routeType", type: "uint8" },
         ],
       },
       { name: "rewardAmount", type: "uint256" },
       { name: "sweepRecipient", type: "address" },
     ],
     outputs: [{ name: "intentHash", type: "bytes32" }],
-    stateMutability: "nonpayable",
+    stateMutability: "payable",
   },
   {
     name: "IntentCreated",
@@ -46,10 +47,7 @@ export const swapIntentAbi = [
     inputs: [
       { name: "intentHash", type: "bytes32", indexed: true },
       { name: "user", type: "address", indexed: true },
-      { name: "rewardToken", type: "address", indexed: false },
       { name: "swapOutput", type: "uint256", indexed: false },
-      { name: "routeAmount", type: "uint256", indexed: false },
-      { name: "destination", type: "uint64", indexed: false },
     ],
   },
 ] as const;

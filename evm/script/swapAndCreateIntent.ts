@@ -51,9 +51,9 @@ const PORTAL_BASE: Address = "0x399Dbd5DF04f83103F77A58cBa2B7c4d3cdede97";
 const BASE_CHAIN_ID = 8453n;
 
 // Fee parameters
-const SCALAR_FEE_BPS = 6n;
-const SCALAR_DENOM = 10000n;
-const SCALAR_NUM = SCALAR_DENOM - SCALAR_FEE_BPS;
+const FEE_BPS = 6n;
+const FEE_DENOMINATOR = 10000n;
+const FEE_NUMERATOR = FEE_DENOMINATOR - FEE_BPS;
 const FLAT_FEE = parseUnits("0.01", 18); // $0.01 — USDC on BSC is 18 decimals
 
 // ─── Route Template Builder ─────────────────────────────────────────────────
@@ -170,7 +170,7 @@ function buildSwapCalls(
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
-  const privateKey = process.env.USER_PRIVATE_KEY;
+  const privateKey = process.env.PRIVATE_KEY;
   if (!privateKey) {
     throw new Error("PRIVATE_KEY env var is required");
   }
@@ -249,11 +249,12 @@ async function main() {
         rewardCreator: account.address,
         rewardProver: PROVER,
         flatFee: FLAT_FEE,
-        scalarNum: SCALAR_NUM,
-        scalarDenom: SCALAR_DENOM,
+        feeNumerator: FEE_NUMERATOR,
+        feeDenominator: FEE_DENOMINATOR,
         sourceDecimals: 18, // USDC on BSC
         destinationDecimals: 6, // USDC on Base
         allowPartial: false,
+        routeType: 0, // EVM
       },
       0n, // rewardAmount (0 = use full swapOutput)
       account.address, // sweepRecipient
@@ -275,14 +276,11 @@ async function main() {
   });
 
   if (intentEvent) {
-    const { intentHash, swapOutput, routeAmount, destination } =
-      intentEvent.args;
+    const { intentHash, swapOutput } = intentEvent.args;
     console.log();
     console.log("Intent created!");
     console.log(`  intentHash:  ${intentHash}`);
     console.log(`  swapOutput:  ${swapOutput}`);
-    console.log(`  routeAmount: ${routeAmount}`);
-    console.log(`  destination: ${destination}`);
   }
 }
 
