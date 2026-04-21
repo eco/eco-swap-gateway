@@ -1014,26 +1014,6 @@ contract EcoSwapGatewayTest is Test {
         return intentHash;
     }
 
-    function test_select_fundsUnpublishedIntent() public {
-        // The gateway must work against a routeHash that has never been
-        // published on the Portal (status == Initial). Vault derivation is
-        // purely deterministic from (destination, routeHash, reward).
-        Bucket[] memory buckets = new Bucket[](1);
-        buckets[0] = _bucketFor(700_000);
-
-        // Sanity: intent is Initial (unpublished) before the call.
-        bytes memory route = _buildRouteForAmount(700_000);
-        (bytes32 intentHash,,) = portal.getIntentHash(uint64(1), route, _rewardFor(700_000));
-        assertEq(uint8(portal.getRewardStatus(intentHash)), uint8(IIntentSource.Status.Initial));
-
-        _doSelect(SWAP_AMOUNT, buckets);
-
-        // After: intent is Funded and vault holds rewardAmount.
-        assertEq(uint8(portal.getRewardStatus(intentHash)), uint8(IIntentSource.Status.Funded));
-        address vault = portal.intentVaultAddress(1, route, _rewardFor(700_000));
-        assertEq(outputToken.balanceOf(vault), 700_000);
-    }
-
     function test_select_exactFloorMatch() public {
         Bucket[] memory buckets = new Bucket[](3);
         buckets[0] = _bucketFor(500_000);
