@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# deploySwapIntent.sh
+# deployEcoSwapGateway.sh
 #
-# Deploys the SwapIntent contract to multiple chains using CreateX CREATE2
+# Deploys the EcoSwapGateway contract to multiple chains using CreateX CREATE2
 # for deterministic same-address deployment. Any deployer can reproduce
 # the same address on a new chain (unguarded salt).
 #
@@ -98,11 +98,11 @@ echo "$DEPLOY_JSON" | jq -c 'to_entries[]' | while IFS= read -r entry; do
     # Replace environment variable placeholders (e.g. ${ALCHEMY_API_KEY})
     RPC_URL=$(eval echo "$RPC_URL")
 
-    echo "Deploying SwapIntent on Chain ID: $CHAIN_ID"
+    echo "Deploying EcoSwapGateway on Chain ID: $CHAIN_ID"
 
     # Build forge command
     FOUNDRY_CMD="PORTAL_ADDRESS=\"$PORTAL_ADDRESS\" SALT=\"$SALT\" DEPLOY_FILE=\"$RESULTS_FILE\" \
-        forge script script/DeploySwapIntentCreateX.s.sol \
+        forge script script/DeployEcoSwapGatewayCreateX.s.sol \
         --rpc-url \"$RPC_URL\" \
         --slow \
         --broadcast \

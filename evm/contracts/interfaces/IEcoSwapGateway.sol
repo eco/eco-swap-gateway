@@ -29,7 +29,7 @@ struct IntentParams {
     RouteType routeType;
 }
 
-interface ISwapIntent {
+interface IEcoSwapGateway {
     // --- Events ---
 
     event IntentCreated(bytes32 indexed intentHash, address indexed user, uint256 swapOutput);

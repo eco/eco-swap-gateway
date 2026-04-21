@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Script, console} from "forge-std/Script.sol";
-import {SwapIntent} from "../contracts/SwapIntent.sol";
+import {EcoSwapGateway} from "../contracts/EcoSwapGateway.sol";
 
 /// @notice Minimal CreateX interface – only the functions this script needs.
 interface ICreateX {
@@ -10,13 +10,13 @@ interface ICreateX {
     function computeCreate2Address(bytes32 salt, bytes32 initCodeHash) external view returns (address);
 }
 
-/// @title DeploySwapIntentCreateX
-/// @notice Deploys SwapIntent via CreateX CREATE2 for deterministic same-address
+/// @title DeployEcoSwapGatewayCreateX
+/// @notice Deploys EcoSwapGateway via CreateX CREATE2 for deterministic same-address
 ///         deployment across many chains.
 /// @dev    Any deployer can reproduce the same address on a new chain.
 ///         CreateX._guard hashes the salt via keccak256(abi.encode(salt)),
 ///         so we apply the same transform when predicting the address.
-contract DeploySwapIntentCreateX is Script {
+contract DeployEcoSwapGatewayCreateX is Script {
     ICreateX constant CREATEX = ICreateX(0xba5Ed099633D3B313e4D5F7bdc1305d3c28ba5Ed);
 
     function run() external {
@@ -30,7 +30,7 @@ contract DeploySwapIntentCreateX is Script {
 
         // --- Build init code ---
         bytes memory initCode = abi.encodePacked(
-            type(SwapIntent).creationCode,
+            type(EcoSwapGateway).creationCode,
             abi.encode(portalAddress)
         );
         bytes32 initCodeHash = keccak256(initCode);
@@ -42,11 +42,11 @@ contract DeploySwapIntentCreateX is Script {
         // guarded salt ourselves to get the correct prediction.
         bytes32 guardedSalt = keccak256(abi.encode(salt));
         address predicted = CREATEX.computeCreate2Address(guardedSalt, initCodeHash);
-        console.log("Predicted SwapIntent address:", predicted);
+        console.log("Predicted EcoSwapGateway address:", predicted);
 
         // --- Skip if already deployed ---
         if (predicted.code.length > 0) {
-            console.log("SwapIntent already deployed at:", predicted);
+            console.log("EcoSwapGateway already deployed at:", predicted);
             _writeResult(deployFilePath, predicted, portalAddress);
             return;
         }
@@ -57,7 +57,7 @@ contract DeploySwapIntentCreateX is Script {
         vm.stopBroadcast();
 
         require(deployed == predicted, "Deployed address does not match prediction");
-        console.log("SwapIntent deployed at:", deployed);
+        console.log("EcoSwapGateway deployed at:", deployed);
 
         // --- Record result ---
         _writeResult(deployFilePath, deployed, portalAddress);
@@ -72,7 +72,7 @@ contract DeploySwapIntentCreateX is Script {
                     ",",
                     vm.toString(deployed),
                     ",",
-                    "contracts/SwapIntent.sol:SwapIntent",
+                    "contracts/EcoSwapGateway.sol:EcoSwapGateway",
                     ",",
                     vm.toString(abi.encode(portal))
                 )

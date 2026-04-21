@@ -1,14 +1,14 @@
 /**
- * SwapIntent Example: PEPE → USDC on BSC, then USDC on BSC → USDC on Base
+ * EcoSwapGateway Example: PEPE → USDC on BSC, then USDC on BSC → USDC on Base
  *
  * This script demonstrates the full flow:
  *   1. Build the destination-chain route template (ERC20 transfer on Base)
  *   2. Compute byte offsets for amount patching
  *   3. Encode the swap calls (approve + Uniswap V3 exactInputSingle)
- *   4. Call SwapIntent.swapAndCreateIntent
+ *   4. Call EcoSwapGateway.swapAndCreateIntent
  *
  * Usage:
- *   PRIVATE_KEY=0x... SWAP_INTENT_ADDRESS=0x... npx tsx evm/script/swapAndCreateIntent.ts
+ *   PRIVATE_KEY=0x... ECO_SWAP_GATEWAY_ADDRESS=0x... npx tsx evm/script/swapAndCreateIntent.ts
  */
 
 import "dotenv/config";
@@ -29,7 +29,7 @@ import {
 import { bsc } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { swapIntentAbi } from "./abi/swapIntent.js";
+import { ecoSwapGatewayAbi } from "./abi/ecoSwapGateway.js";
 import { uniswapV3RouterAbi } from "./abi/uniswapV3Router.js";
 import { EVMRouteAbiItem } from "./abi/portal.js";
 
@@ -130,12 +130,12 @@ function buildRouteTemplate(recipient: Address): {
 // ─── Swap Calls Builder ─────────────────────────────────────────────────────
 
 /**
- * Build the Call[] array that SwapIntent will execute:
+ * Build the Call[] array that EcoSwapGateway will execute:
  *   [0] approve Uniswap router to spend PEPE
  *   [1] Uniswap V3 exactInputSingle: PEPE → USDC
  */
 function buildSwapCalls(
-  swapIntentAddress: Address,
+  ecoSwapGatewayAddress: Address,
   inputAmount: bigint,
   minOutputAmount: bigint,
 ): Array<{ target: Address; data: Hex; value: bigint }> {
@@ -153,7 +153,7 @@ function buildSwapCalls(
         tokenIn: PEPE_BSC,
         tokenOut: USDC_BSC,
         fee: 3000, // 0.3% pool
-        recipient: swapIntentAddress, // output goes to SwapIntent
+        recipient: ecoSwapGatewayAddress, // output goes to EcoSwapGateway
         amountIn: inputAmount,
         amountOutMinimum: minOutputAmount,
         sqrtPriceLimitX96: 0n,
@@ -174,11 +174,11 @@ async function main() {
   if (!privateKey) {
     throw new Error("PRIVATE_KEY env var is required");
   }
-  const swapIntentAddress = process.env.SWAP_INTENT_ADDRESS as
+  const ecoSwapGatewayAddress = process.env.ECO_SWAP_GATEWAY_ADDRESS as
     | Address
     | undefined;
-  if (!swapIntentAddress) {
-    throw new Error("SWAP_INTENT_ADDRESS env var is required");
+  if (!ecoSwapGatewayAddress) {
+    throw new Error("ECO_SWAP_GATEWAY_ADDRESS env var is required");
   }
 
   const rpcUrl = process.env.BSC_RPC_URL ?? "https://bsc-dataseed.binance.org";
@@ -200,7 +200,7 @@ async function main() {
   const rewardDeadline = BigInt(Math.floor(Date.now() / 1000) + 7200); // 2 hours
 
   console.log(`Account:        ${account.address}`);
-  console.log(`SwapIntent:     ${swapIntentAddress}`);
+  console.log(`EcoSwapGateway:     ${ecoSwapGatewayAddress}`);
   console.log(`Input:          ${PEPE_AMOUNT.toLocaleString()} PEPE`);
   console.log(`Swap:           PEPE → USDC on BSC (Uniswap V3)`);
   console.log(`Intent:         USDC on BSC → USDC on Base`);
@@ -216,15 +216,19 @@ async function main() {
   console.log();
 
   // 2. Build swap calls
-  const calls = buildSwapCalls(swapIntentAddress, inputAmount, minOutputAmount);
+  const calls = buildSwapCalls(
+    ecoSwapGatewayAddress,
+    inputAmount,
+    minOutputAmount,
+  );
 
-  // 3. Approve SwapIntent to pull PEPE
-  console.log("Approving SwapIntent to spend PEPE...");
+  // 3. Approve EcoSwapGateway to pull PEPE
+  console.log("Approving EcoSwapGateway to spend PEPE...");
   const approveHash = await walletClient.writeContract({
     address: PEPE_BSC,
     abi: erc20Abi,
     functionName: "approve",
-    args: [swapIntentAddress, inputAmount],
+    args: [ecoSwapGatewayAddress, inputAmount],
   });
   await publicClient.waitForTransactionReceipt({ hash: approveHash });
   console.log(`  tx: ${approveHash}`);
@@ -232,8 +236,8 @@ async function main() {
   // 4. Execute swapAndCreateIntent
   console.log("Executing swapAndCreateIntent...");
   const txHash = await walletClient.writeContract({
-    address: swapIntentAddress,
-    abi: swapIntentAbi,
+    address: ecoSwapGatewayAddress,
+    abi: ecoSwapGatewayAbi,
     functionName: "swapAndCreateIntent",
     args: [
       PEPE_BSC,
@@ -269,7 +273,7 @@ async function main() {
 
   // 5. Parse IntentCreated event
   const [intentEvent] = parseEventLogs({
-    abi: swapIntentAbi,
+    abi: ecoSwapGatewayAbi,
     eventName: "IntentCreated",
     strict: true,
     logs: receipt.logs,

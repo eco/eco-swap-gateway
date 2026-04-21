@@ -1,4 +1,4 @@
-export const swapIntentAbi = [
+export const ecoSwapGatewayAbi = [
   {
     name: "swapAndCreateIntent",
     type: "function",

@@ -9,16 +9,16 @@ import {Call, Reward, TokenAmount} from "eco-routes/contracts/types/Intent.sol";
 import {IIntentSource} from "eco-routes/contracts/interfaces/IIntentSource.sol";
 import {Endian} from "eco-routes/contracts/libs/Endian.sol";
 
-import {ISwapIntent, IntentParams, RouteType} from "./interfaces/ISwapIntent.sol";
+import {IEcoSwapGateway, IntentParams, RouteType} from "./interfaces/IEcoSwapGateway.sol";
 
-/// @title SwapIntent
+/// @title EcoSwapGateway
 /// @notice Atomically swaps tokens via arbitrary DEX calls and creates a Portal
 ///         intent. The reward amount defaults to the full swap output, or can be
 ///         set explicitly (useful for any-to-any flows where the user splits the
 ///         swap output across multiple intents).
 /// @dev Does not support fee-on-transfer tokens as outputToken.
 ///      Supports both EVM and SVM destination routes via RouteType.
-contract SwapIntent is ISwapIntent, ReentrancyGuard {
+contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice Sentinel value: skip calldata offset patching.
@@ -37,7 +37,7 @@ contract SwapIntent is ISwapIntent, ReentrancyGuard {
     /// @dev Accepts ETH refunds from DEX routers during multi-hop swaps.
     receive() external payable {}
 
-    /// @inheritdoc ISwapIntent
+    /// @inheritdoc IEcoSwapGateway
     function swapAndCreateIntent(
         address inputToken,
         uint256 inputAmount,
