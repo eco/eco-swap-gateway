@@ -47,37 +47,33 @@ interface IEcoSwapGateway {
     error InvalidSweepRecipient();
     error InvalidRewardCreator();
     error InvalidRewardProver();
-    error RewardExceedsSwapOutput();
     error NativeTransferFailed();
     error AmountOverflowU64();
 
     // --- Core ---
 
-    /// @notice Executes swap calls, measures the output delta, and creates + funds
-    ///         an intent via Portal.publishAndFund.
-    /// @dev Does not support fee-on-transfer tokens as outputToken. The reward amount
-    ///      is set to the raw balance delta, which would be incorrect for deflationary
-    ///      tokens since a second transfer fee applies when funding the Portal vault.
-    ///      Callers must include token approval calls (e.g., inputToken.approve(dex, amount))
-    ///      in the swapCalls array — the contract does not pre-approve any targets.
-    ///      This helper supports both EVM and SVM destination routes via RouteType.
+    /// @notice Executes swap calls, measures the output delta, patches the
+    ///         caller-supplied route template with the computed route amount,
+    ///         and creates + funds an intent via `Portal.publishAndFund`.
+    /// @dev Reward equals the full `swapOutput` (balance delta on `outputToken`).
+    ///      Does not support fee-on-transfer tokens as `outputToken`. Callers
+    ///      must include token approval calls (e.g., `inputToken.approve(dex, amount)`)
+    ///      in `swapCalls` — the contract does not pre-approve any targets.
+    ///      Supports both EVM and SVM destination routes via `RouteType`.
     /// @param inputToken      ERC20 token to pull from the caller.
     /// @param inputAmount     Amount of inputToken to pull (must be > 0).
     /// @param outputToken     ERC20 token expected from the swap (reward token).
     /// @param swapCalls       Arbitrary calls for swap execution (approve, swap, etc.).
-    /// @param intent          Intent creation parameters.
-    /// @param rewardAmount    Reward locked for the solver. 0 = use full swapOutput.
-    ///                        For any-to-any flows, set explicitly so the excess can be
-    ///                        swept and used to fund a second intent.
-    /// @param sweepRecipient  Address to receive residual tokens and ETH after the swap.
-    /// @return intentHash Hash of the created intent.
+    /// @param intent          Intent creation parameters (including route template + offsets).
+    /// @param sweepRecipient  Address to receive residual tokens and ETH.
+    ///                        Pass `address(0)` to default to `msg.sender`.
+    /// @return intentHash     Hash of the created intent.
     function swapAndCreateIntent(
         address inputToken,
         uint256 inputAmount,
         address outputToken,
         Call[] calldata swapCalls,
         IntentParams calldata intent,
-        uint256 rewardAmount,
         address sweepRecipient
     ) external payable returns (bytes32 intentHash);
 }

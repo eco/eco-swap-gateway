@@ -12,10 +12,10 @@ import {Endian} from "eco-routes/contracts/libs/Endian.sol";
 import {IEcoSwapGateway, IntentParams, RouteType} from "./interfaces/IEcoSwapGateway.sol";
 
 /// @title EcoSwapGateway
-/// @notice Atomically swaps tokens via arbitrary DEX calls and creates a Portal
-///         intent. The reward amount defaults to the full swap output, or can be
-///         set explicitly (useful for any-to-any flows where the user splits the
-///         swap output across multiple intents).
+/// @notice Atomically swaps tokens via arbitrary DEX calls, patches the
+///         caller-supplied route template with the computed route amount, and
+///         creates + funds a Portal intent. Reward always equals the full
+///         swap output.
 /// @dev Does not support fee-on-transfer tokens as outputToken.
 ///      Supports both EVM and SVM destination routes via RouteType.
 contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
@@ -44,13 +44,10 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         address outputToken,
         Call[] calldata swapCalls,
         IntentParams calldata intent,
-        uint256 rewardAmount,
         address sweepRecipient
     ) external payable nonReentrant returns (bytes32 intentHash) {
         // 1. Validate parameters.
-        if (sweepRecipient == address(0) || sweepRecipient == address(this)) {
-            revert InvalidSweepRecipient();
-        }
+        address resolvedSweep = _resolveSweepRecipient(sweepRecipient);
         if (intent.rewardCreator == address(0)) revert InvalidRewardCreator();
         if (intent.rewardProver == address(0)) revert InvalidRewardProver();
         if (intent.feeDenominator == 0 || intent.feeNumerator == 0 || intent.feeNumerator > intent.feeDenominator) {
@@ -63,26 +60,27 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         // 3. Calculate route amount and patch route template.
         bytes memory route = _buildRoute(swapOutput, intent);
 
-        // 4. Resolve reward amount: 0 means use full swapOutput.
-        //    For any-to-any flows, set explicitly so the excess can be
-        //    swept and used to fund a second intent.
-        uint256 actualReward = rewardAmount == 0 ? swapOutput : rewardAmount;
-        if (actualReward > swapOutput) revert RewardExceedsSwapOutput();
+        // 4. Publish and fund intent (reward = full swap output).
+        intentHash = _publishAndFund(outputToken, swapOutput, route, intent);
 
-        // 5. Publish and fund intent.
-        intentHash = _publishAndFund(outputToken, actualReward, route, intent);
-
-        // 6. Emit event.
+        // 5. Emit event.
         emit IntentCreated(intentHash, msg.sender, swapOutput);
 
-        // 7. Cleanup: reset approvals, sweep residual tokens and ETH.
+        // 6. Cleanup: reset approvals, sweep residual tokens and ETH.
         IERC20(outputToken).forceApprove(address(PORTAL), 0);
         for (uint256 i; i < swapCalls.length; ++i) {
             IERC20(inputToken).forceApprove(swapCalls[i].target, 0);
         }
-        _sweepToken(inputToken, sweepRecipient);
-        _sweepToken(outputToken, sweepRecipient);
-        _sweepETH(sweepRecipient);
+        _sweepToken(inputToken, resolvedSweep);
+        _sweepToken(outputToken, resolvedSweep);
+        _sweepETH(resolvedSweep);
+    }
+
+    function _resolveSweepRecipient(address sweepRecipient) internal view returns (address resolved) {
+        resolved = sweepRecipient == address(0) ? msg.sender : sweepRecipient;
+        if (resolved == address(this) || resolved == address(PORTAL)) {
+            revert InvalidSweepRecipient();
+        }
     }
 
     // --- Internal helpers ---
@@ -134,12 +132,12 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
 
     function _publishAndFund(
         address outputToken,
-        uint256 actualReward,
+        uint256 swapOutput,
         bytes memory route,
         IntentParams calldata intent
     ) internal returns (bytes32 intentHash) {
         TokenAmount[] memory tokens = new TokenAmount[](1);
-        tokens[0] = TokenAmount({token: outputToken, amount: actualReward});
+        tokens[0] = TokenAmount({token: outputToken, amount: swapOutput});
         Reward memory reward = Reward({
             deadline: intent.rewardDeadline,
             creator: intent.rewardCreator,
@@ -148,7 +146,7 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
             tokens: tokens
         });
 
-        IERC20(outputToken).forceApprove(address(PORTAL), actualReward);
+        IERC20(outputToken).forceApprove(address(PORTAL), swapOutput);
         (intentHash,) = PORTAL.publishAndFund(intent.destination, route, reward, intent.allowPartial);
     }
 

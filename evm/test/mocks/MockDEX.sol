@@ -64,6 +64,6 @@ contract ReentrantDEX {
             allowPartial: false,
             routeType: RouteType.EVM
         });
-        TARGET.swapAndCreateIntent(address(INPUT_TOKEN), 0, address(OUTPUT_TOKEN), calls, intent, 0, address(this));
+        TARGET.swapAndCreateIntent(address(INPUT_TOKEN), 0, address(OUTPUT_TOKEN), calls, intent, address(this));
     }
 }

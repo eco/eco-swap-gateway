@@ -260,7 +260,6 @@ async function main() {
         allowPartial: false,
         routeType: 0, // EVM
       },
-      0n, // rewardAmount (0 = use full swapOutput)
       account.address, // sweepRecipient
     ],
   });
