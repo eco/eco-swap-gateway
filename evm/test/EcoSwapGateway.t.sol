@@ -10,7 +10,7 @@ import {IIntentSource} from "eco-routes/contracts/interfaces/IIntentSource.sol";
 import {TestERC20} from "eco-routes/contracts/test/TestERC20.sol";
 
 import {EcoSwapGateway} from "../contracts/EcoSwapGateway.sol";
-import {IEcoSwapGateway, IntentParams, RouteType} from "../contracts/interfaces/IEcoSwapGateway.sol";
+import {IEcoSwapGateway, IntentParams, RouteType, Bucket} from "../contracts/interfaces/IEcoSwapGateway.sol";
 import {MockDEX, ReentrantDEX} from "./mocks/MockDEX.sol";
 
 contract EcoSwapGatewayTest is Test {
@@ -961,6 +961,414 @@ contract EcoSwapGatewayTest is Test {
 
         assertEq(outputToken.balanceOf(address(ecoSwapGateway)), 0);
         assertEq(inputToken.balanceOf(address(ecoSwapGateway)), 0);
+    }
+
+    // ─── swapAndSelectIntent (bucketed) ───────────────────────────
+
+    function _buildRouteForAmount(uint256 amount) internal pure returns (bytes memory route) {
+        route = new bytes(128);
+        assembly {
+            mstore(add(add(route, 0x20), 32), amount)
+            mstore(add(add(route, 0x20), 96), amount)
+        }
+    }
+
+    function _baseReward() internal view returns (Reward memory reward) {
+        TokenAmount[] memory tokens = new TokenAmount[](1);
+        tokens[0] = TokenAmount({token: address(outputToken), amount: 0});
+        reward = Reward({
+            deadline: uint64(block.timestamp + 3600),
+            creator: user,
+            prover: prover,
+            nativeAmount: 0,
+            tokens: tokens
+        });
+    }
+
+    function _rewardFor(uint256 amount) internal view returns (Reward memory reward) {
+        reward = _baseReward();
+        reward.tokens[0].amount = amount;
+    }
+
+    function _bucketFor(uint256 amount) internal view returns (Bucket memory bucket) {
+        bytes memory route = _buildRouteForAmount(amount);
+        (, bytes32 routeHash,) = portal.getIntentHash(uint64(1), route, _rewardFor(amount));
+        bucket = Bucket({routeHash: routeHash, rewardAmount: amount});
+    }
+
+    function _doSelect(uint256 amount, Bucket[] memory buckets) internal returns (bytes32) {
+        Reward memory baseReward = _baseReward();
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), amount);
+        bytes32 intentHash = ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            amount,
+            address(outputToken),
+            _buildSwapCalls(amount),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+        return intentHash;
+    }
+
+    function test_select_exactFloorMatch() public {
+        Bucket[] memory buckets = new Bucket[](3);
+        buckets[0] = _bucketFor(500_000);
+        buckets[1] = _bucketFor(1_000_000); // matches SWAP_AMOUNT exactly
+        buckets[2] = _bucketFor(1_500_000);
+
+        bytes32 intentHash = _doSelect(SWAP_AMOUNT, buckets);
+        assertTrue(intentHash != bytes32(0));
+
+        // Vault holds exactly bucket[1].rewardAmount
+        bytes memory route = _buildRouteForAmount(1_000_000);
+        address vault = portal.intentVaultAddress(1, route, _rewardFor(1_000_000));
+        assertEq(outputToken.balanceOf(vault), 1_000_000);
+    }
+
+    function test_select_floorBetweenBuckets() public {
+        Bucket[] memory buckets = new Bucket[](3);
+        buckets[0] = _bucketFor(400_000);
+        buckets[1] = _bucketFor(900_000); // floor for swapOutput = 1M
+        buckets[2] = _bucketFor(1_200_000);
+
+        _doSelect(SWAP_AMOUNT, buckets);
+
+        bytes memory route = _buildRouteForAmount(900_000);
+        address vault = portal.intentVaultAddress(1, route, _rewardFor(900_000));
+        assertEq(outputToken.balanceOf(vault), 900_000);
+        // Surplus (100_000) goes back to user via sweepRecipient.
+        assertEq(outputToken.balanceOf(user), 100_000);
+    }
+
+    function test_select_capsAtTopBucket() public {
+        Bucket[] memory buckets = new Bucket[](3);
+        buckets[0] = _bucketFor(100_000);
+        buckets[1] = _bucketFor(200_000);
+        buckets[2] = _bucketFor(300_000); // top bucket, well below SWAP_AMOUNT
+
+        _doSelect(SWAP_AMOUNT, buckets);
+
+        bytes memory route = _buildRouteForAmount(300_000);
+        address vault = portal.intentVaultAddress(1, route, _rewardFor(300_000));
+        assertEq(outputToken.balanceOf(vault), 300_000);
+        assertEq(outputToken.balanceOf(user), SWAP_AMOUNT - 300_000);
+    }
+
+    function test_select_emitsIntentSelected() public {
+        Bucket[] memory buckets = new Bucket[](2);
+        buckets[0] = _bucketFor(800_000);
+        buckets[1] = _bucketFor(1_000_000);
+
+        Reward memory baseReward = _baseReward();
+        bytes32 expectedBucketsHash = keccak256(abi.encode(buckets));
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectEmit(false, true, false, true);
+        emit IEcoSwapGateway.IntentSelected(
+            bytes32(0), user, SWAP_AMOUNT, 1, 1_000_000, expectedBucketsHash
+        );
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_emptyBuckets() public {
+        Bucket[] memory buckets = new Bucket[](0);
+        Reward memory baseReward = _baseReward();
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.EmptyBuckets.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_bucketsNotAscending() public {
+        Bucket[] memory buckets = new Bucket[](3);
+        buckets[0] = _bucketFor(500_000);
+        buckets[1] = _bucketFor(1_000_000);
+        buckets[2] = _bucketFor(1_000_000); // equal to previous, not strictly ascending
+
+        Reward memory baseReward = _baseReward();
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.BucketsNotAscending.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_bucketsDescending() public {
+        Bucket[] memory buckets = new Bucket[](2);
+        buckets[0] = _bucketFor(1_000_000);
+        buckets[1] = _bucketFor(500_000);
+
+        Reward memory baseReward = _baseReward();
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.BucketsNotAscending.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_belowMinBucket() public {
+        Bucket[] memory buckets = new Bucket[](2);
+        buckets[0] = _bucketFor(SWAP_AMOUNT + 1); // min is above the swap output
+        buckets[1] = _bucketFor(SWAP_AMOUNT + 2);
+
+        Reward memory baseReward = _baseReward();
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.SwapOutputBelowMinBucket.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_invalidBaseReward_wrongToken() public {
+        Bucket[] memory buckets = new Bucket[](1);
+        buckets[0] = _bucketFor(500_000);
+
+        Reward memory baseReward = _baseReward();
+        baseReward.tokens[0].token = address(inputToken); // wrong token
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.InvalidBaseReward.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_invalidBaseReward_nonZeroAmount() public {
+        Bucket[] memory buckets = new Bucket[](1);
+        buckets[0] = _bucketFor(500_000);
+
+        Reward memory baseReward = _baseReward();
+        baseReward.tokens[0].amount = 1; // placeholder must be 0
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.InvalidBaseReward.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_invalidBaseReward_nativeAmount() public {
+        Bucket[] memory buckets = new Bucket[](1);
+        buckets[0] = _bucketFor(500_000);
+
+        Reward memory baseReward = _baseReward();
+        baseReward.nativeAmount = 1; // must be 0
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.InvalidBaseReward.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_invalidBaseReward_wrongLength() public {
+        Bucket[] memory buckets = new Bucket[](1);
+        buckets[0] = _bucketFor(500_000);
+
+        TokenAmount[] memory tokens = new TokenAmount[](2);
+        tokens[0] = TokenAmount({token: address(outputToken), amount: 0});
+        tokens[1] = TokenAmount({token: address(outputToken), amount: 0});
+        Reward memory baseReward = Reward({
+            deadline: uint64(block.timestamp + 3600),
+            creator: user,
+            prover: prover,
+            nativeAmount: 0,
+            tokens: tokens
+        });
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.InvalidBaseReward.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_invalidRewardCreator() public {
+        Bucket[] memory buckets = new Bucket[](1);
+        buckets[0] = _bucketFor(500_000);
+
+        Reward memory baseReward = _baseReward();
+        baseReward.creator = address(0);
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.InvalidRewardCreator.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_invalidSweepRecipient_self() public {
+        Bucket[] memory buckets = new Bucket[](1);
+        buckets[0] = _bucketFor(500_000);
+        Reward memory baseReward = _baseReward();
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.InvalidSweepRecipient.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            address(ecoSwapGateway)
+        );
+        vm.stopPrank();
+    }
+
+    function test_select_frontRunFundingIsNoOp() public {
+        // Third-party funds the selected bucket first.
+        // allowPartial=true makes the helper's fund a no-op; user's swap output
+        // is swept back rather than stranded.
+        Bucket[] memory buckets = new Bucket[](2);
+        buckets[0] = _bucketFor(800_000);
+        buckets[1] = _bucketFor(1_000_000);
+
+        address frontRunner = makeAddr("frontRunner");
+        outputToken.mint(frontRunner, 1_000_000);
+        bytes memory route = _buildRouteForAmount(1_000_000);
+        Reward memory frontReward = _rewardFor(1_000_000);
+
+        vm.startPrank(frontRunner);
+        outputToken.approve(address(portal), 1_000_000);
+        portal.fund(uint64(1), keccak256(route), frontReward, false);
+        vm.stopPrank();
+
+        uint256 userOutputBefore = outputToken.balanceOf(user);
+
+        _doSelect(SWAP_AMOUNT, buckets);
+
+        // Vault already fully funded by frontRunner.
+        address vault = portal.intentVaultAddress(1, route, frontReward);
+        assertEq(outputToken.balanceOf(vault), 1_000_000);
+        // Helper's 1_000_000 of output token was not consumed; all swept to user.
+        assertEq(outputToken.balanceOf(user), userOutputBefore + SWAP_AMOUNT);
+        assertEq(outputToken.balanceOf(address(ecoSwapGateway)), 0);
+    }
+
+    function test_select_sweepsSurplusToRecipient() public {
+        address recipient = makeAddr("sweepRecipient");
+        Bucket[] memory buckets = new Bucket[](2);
+        buckets[0] = _bucketFor(400_000);
+        buckets[1] = _bucketFor(600_000);
+
+        Reward memory baseReward = _baseReward();
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(outputToken),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            recipient
+        );
+        vm.stopPrank();
+
+        assertEq(outputToken.balanceOf(recipient), SWAP_AMOUNT - 600_000);
+        assertEq(outputToken.balanceOf(address(ecoSwapGateway)), 0);
     }
 }
 

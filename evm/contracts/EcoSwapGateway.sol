@@ -9,7 +9,7 @@ import {Call, Reward, TokenAmount} from "eco-routes/contracts/types/Intent.sol";
 import {IIntentSource} from "eco-routes/contracts/interfaces/IIntentSource.sol";
 import {Endian} from "eco-routes/contracts/libs/Endian.sol";
 
-import {IEcoSwapGateway, IntentParams, RouteType} from "./interfaces/IEcoSwapGateway.sol";
+import {IEcoSwapGateway, IntentParams, RouteType, Bucket} from "./interfaces/IEcoSwapGateway.sol";
 
 /// @title EcoSwapGateway
 /// @notice Atomically swaps tokens via arbitrary DEX calls, patches the
@@ -81,6 +81,99 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         if (resolved == address(this) || resolved == address(PORTAL)) {
             revert InvalidSweepRecipient();
         }
+    }
+
+    /// @inheritdoc IEcoSwapGateway
+    function swapAndSelectIntent(
+        address inputToken,
+        uint256 inputAmount,
+        address outputToken,
+        Call[] calldata swapCalls,
+        uint64 destination,
+        Reward calldata baseReward,
+        Bucket[] calldata buckets,
+        address sweepRecipient
+    ) external payable nonReentrant returns (bytes32 intentHash) {
+        // 1. Validate parameters.
+        address resolvedSweep = _resolveSweepRecipient(sweepRecipient);
+        _validateBaseReward(baseReward, outputToken);
+
+        // 2. Pull input tokens and execute swap.
+        uint256 swapOutput = _executeSwap(inputToken, inputAmount, outputToken, swapCalls);
+
+        // 3. Single-pass ascending validation + floor selection.
+        uint256 k = _selectBucket(buckets, swapOutput);
+        uint256 rewardAmount = buckets[k].rewardAmount;
+
+        // 4. Clone the reward template with the bucket's amount.
+        Reward memory reward = _cloneRewardWithAmount(baseReward, rewardAmount);
+
+        // 5. Fund the selected intent (allowPartial=true → front-run funding is a no-op).
+        IERC20(outputToken).forceApprove(address(PORTAL), rewardAmount);
+        intentHash = PORTAL.fund(destination, buckets[k].routeHash, reward, true);
+
+        // 6. Emit selection event with bucketsHash for audit.
+        emit IntentSelected(
+            intentHash, msg.sender, swapOutput, k, rewardAmount, keccak256(abi.encode(buckets))
+        );
+
+        // 7. Cleanup: reset approvals, sweep residuals + surplus.
+        IERC20(outputToken).forceApprove(address(PORTAL), 0);
+        for (uint256 i; i < swapCalls.length; ++i) {
+            IERC20(inputToken).forceApprove(swapCalls[i].target, 0);
+        }
+        _sweepToken(inputToken, resolvedSweep);
+        _sweepToken(outputToken, resolvedSweep);
+        _sweepETH(resolvedSweep);
+    }
+
+    function _validateBaseReward(Reward calldata baseReward, address outputToken) internal pure {
+        if (baseReward.creator == address(0)) revert InvalidRewardCreator();
+        if (baseReward.prover == address(0)) revert InvalidRewardProver();
+        if (baseReward.nativeAmount != 0) revert InvalidBaseReward();
+        if (baseReward.tokens.length != 1) revert InvalidBaseReward();
+        if (baseReward.tokens[0].token != outputToken) revert InvalidBaseReward();
+        if (baseReward.tokens[0].amount != 0) revert InvalidBaseReward();
+    }
+
+    /// @dev Scans `buckets` in a single pass that both enforces strict ascending
+    ///      order and picks the largest index whose `rewardAmount <= swapOutput`.
+    ///      If `swapOutput` exceeds the top bucket, selection naturally caps at
+    ///      `N - 1` (surplus falls to `sweepRecipient`).
+    function _selectBucket(Bucket[] calldata buckets, uint256 swapOutput)
+        internal
+        pure
+        returns (uint256 k)
+    {
+        uint256 n = buckets.length;
+        if (n == 0) revert EmptyBuckets();
+        uint256 floor0 = buckets[0].rewardAmount;
+        if (swapOutput < floor0) revert SwapOutputBelowMinBucket();
+
+        k = 0;
+        uint256 prev = floor0;
+        for (uint256 i = 1; i < n; ++i) {
+            uint256 current = buckets[i].rewardAmount;
+            if (current <= prev) revert BucketsNotAscending();
+            if (current <= swapOutput) k = i;
+            prev = current;
+        }
+    }
+
+    function _cloneRewardWithAmount(Reward calldata baseReward, uint256 amount)
+        internal
+        pure
+        returns (Reward memory reward)
+    {
+        TokenAmount[] memory tokens = new TokenAmount[](1);
+        tokens[0] = TokenAmount({token: baseReward.tokens[0].token, amount: amount});
+        reward = Reward({
+            deadline: baseReward.deadline,
+            creator: baseReward.creator,
+            prover: baseReward.prover,
+            nativeAmount: 0,
+            tokens: tokens
+        });
     }
 
     // --- Internal helpers ---
