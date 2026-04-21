@@ -12,10 +12,13 @@ import {Endian} from "eco-routes/contracts/libs/Endian.sol";
 import {IEcoSwapGateway, IntentParams, RouteType, Bucket} from "./interfaces/IEcoSwapGateway.sol";
 
 /// @title EcoSwapGateway
-/// @notice Atomically swaps tokens via arbitrary DEX calls, patches the
-///         caller-supplied route template with the computed route amount, and
-///         creates + funds a Portal intent. Reward always equals the full
-///         swap output.
+/// @notice Atomically composes a DEX swap with Eco Protocol intent creation.
+///         Exposes two flows:
+///           1. `swapAndCreateIntent` — publish + fund a fresh intent whose
+///              reward equals the full swap output (surplus-free).
+///           2. `swapAndSelectIntent` — fund exactly one of several pre-published
+///              candidate intents (buckets). Reward equals the selected bucket's
+///              amount (≤ swap output); surplus is swept to `sweepRecipient`.
 /// @dev Does not support fee-on-transfer tokens as outputToken.
 ///      Supports both EVM and SVM destination routes via RouteType.
 contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
@@ -67,13 +70,7 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         emit IntentCreated(intentHash, msg.sender, swapOutput);
 
         // 6. Cleanup: reset approvals, sweep residual tokens and ETH.
-        IERC20(outputToken).forceApprove(address(PORTAL), 0);
-        for (uint256 i; i < swapCalls.length; ++i) {
-            IERC20(inputToken).forceApprove(swapCalls[i].target, 0);
-        }
-        _sweepToken(inputToken, resolvedSweep);
-        _sweepToken(outputToken, resolvedSweep);
-        _sweepETH(resolvedSweep);
+        _cleanup(inputToken, outputToken, swapCalls, resolvedSweep);
     }
 
     function _resolveSweepRecipient(address sweepRecipient) internal view returns (address resolved) {
@@ -94,15 +91,17 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         Bucket[] calldata buckets,
         address sweepRecipient
     ) external payable nonReentrant returns (bytes32 intentHash) {
-        // 1. Validate parameters.
+        // 1. Validate parameters that don't depend on swapOutput — fail *before*
+        //    the swap so a malformed call doesn't eat DEX slippage.
         address resolvedSweep = _resolveSweepRecipient(sweepRecipient);
         _validateBaseReward(baseReward, outputToken);
+        _validateBucketsAscending(buckets);
 
         // 2. Pull input tokens and execute swap.
         uint256 swapOutput = _executeSwap(inputToken, inputAmount, outputToken, swapCalls);
 
-        // 3. Single-pass ascending validation + floor selection.
-        uint256 k = _selectBucket(buckets, swapOutput);
+        // 3. Floor-select the bucket for the actual swap output.
+        uint256 k = _findBucketFloor(buckets, swapOutput);
         uint256 rewardAmount = buckets[k].rewardAmount;
 
         // 4. Clone the reward template with the bucket's amount.
@@ -118,45 +117,46 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         );
 
         // 7. Cleanup: reset approvals, sweep residuals + surplus.
-        IERC20(outputToken).forceApprove(address(PORTAL), 0);
-        for (uint256 i; i < swapCalls.length; ++i) {
-            IERC20(inputToken).forceApprove(swapCalls[i].target, 0);
-        }
-        _sweepToken(inputToken, resolvedSweep);
-        _sweepToken(outputToken, resolvedSweep);
-        _sweepETH(resolvedSweep);
+        _cleanup(inputToken, outputToken, swapCalls, resolvedSweep);
     }
 
     function _validateBaseReward(Reward calldata baseReward, address outputToken) internal pure {
         if (baseReward.creator == address(0)) revert InvalidRewardCreator();
         if (baseReward.prover == address(0)) revert InvalidRewardProver();
-        if (baseReward.nativeAmount != 0) revert InvalidBaseReward();
-        if (baseReward.tokens.length != 1) revert InvalidBaseReward();
-        if (baseReward.tokens[0].token != outputToken) revert InvalidBaseReward();
-        if (baseReward.tokens[0].amount != 0) revert InvalidBaseReward();
+        if (baseReward.nativeAmount != 0) revert RewardNativeAmountNotZero();
+        if (baseReward.tokens.length != 1) revert RewardMustHaveOneToken();
+        if (baseReward.tokens[0].token != outputToken) revert RewardTokenMismatch();
+        if (baseReward.tokens[0].amount != 0) revert RewardPlaceholderAmountNotZero();
     }
 
-    /// @dev Scans `buckets` in a single pass that both enforces strict ascending
-    ///      order and picks the largest index whose `rewardAmount <= swapOutput`.
-    ///      If `swapOutput` exceeds the top bucket, selection naturally caps at
-    ///      `N - 1` (surplus falls to `sweepRecipient`).
-    function _selectBucket(Bucket[] calldata buckets, uint256 swapOutput)
+    /// @dev Validates non-empty + strictly ascending. Safe to call pre-swap
+    ///      because neither property depends on swapOutput.
+    function _validateBucketsAscending(Bucket[] calldata buckets) internal pure {
+        uint256 n = buckets.length;
+        if (n == 0) revert EmptyBuckets();
+        uint256 prev = buckets[0].rewardAmount;
+        for (uint256 i = 1; i < n; ++i) {
+            uint256 current = buckets[i].rewardAmount;
+            if (current <= prev) revert BucketsNotAscending();
+            prev = current;
+        }
+    }
+
+    /// @dev Picks the largest index whose `rewardAmount <= swapOutput`. Assumes
+    ///      `_validateBucketsAscending` has already run (buckets are sorted and
+    ///      non-empty). Short-circuits once a bucket exceeds swapOutput. If
+    ///      swapOutput exceeds the top bucket, selection caps at `N - 1`
+    ///      (surplus falls to `sweepRecipient`).
+    function _findBucketFloor(Bucket[] calldata buckets, uint256 swapOutput)
         internal
         pure
         returns (uint256 k)
     {
+        if (swapOutput < buckets[0].rewardAmount) revert SwapOutputBelowMinBucket();
         uint256 n = buckets.length;
-        if (n == 0) revert EmptyBuckets();
-        uint256 floor0 = buckets[0].rewardAmount;
-        if (swapOutput < floor0) revert SwapOutputBelowMinBucket();
-
-        k = 0;
-        uint256 prev = floor0;
         for (uint256 i = 1; i < n; ++i) {
-            uint256 current = buckets[i].rewardAmount;
-            if (current <= prev) revert BucketsNotAscending();
-            if (current <= swapOutput) k = i;
-            prev = current;
+            if (buckets[i].rewardAmount > swapOutput) break;
+            k = i;
         }
     }
 
@@ -278,6 +278,23 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         for (uint256 i; i < 8; ++i) {
             data[offset + i] = leValue[i];
         }
+    }
+
+    /// @dev Shared post-intent cleanup for F1 and F2: reset portal + per-swap-call
+    ///      approvals to zero, then sweep any residual balances to `to`.
+    function _cleanup(
+        address inputToken,
+        address outputToken,
+        Call[] calldata swapCalls,
+        address to
+    ) internal {
+        IERC20(outputToken).forceApprove(address(PORTAL), 0);
+        for (uint256 i; i < swapCalls.length; ++i) {
+            IERC20(inputToken).forceApprove(swapCalls[i].target, 0);
+        }
+        _sweepToken(inputToken, to);
+        _sweepToken(outputToken, to);
+        _sweepETH(to);
     }
 
     function _sweepToken(address token, address to) internal {

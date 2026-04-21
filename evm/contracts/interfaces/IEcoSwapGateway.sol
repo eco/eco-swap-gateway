@@ -70,7 +70,12 @@ interface IEcoSwapGateway {
     error EmptyBuckets();
     error BucketsNotAscending();
     error SwapOutputBelowMinBucket();
-    error InvalidBaseReward();
+
+    // Base-reward validation — split so integrators see which field failed.
+    error RewardNativeAmountNotZero();
+    error RewardMustHaveOneToken();
+    error RewardTokenMismatch();
+    error RewardPlaceholderAmountNotZero();
 
     // --- Core ---
 
@@ -105,14 +110,20 @@ interface IEcoSwapGateway {
     /// @dev The Solver must have already called `Portal.publish` for each
     ///      bucket's `routeHash` before the user signs this tx. Surplus
     ///      (`swapOutput - buckets[k].rewardAmount`) is swept to `sweepRecipient`.
+    ///      Bucket structural invariants are validated *before* the swap so a
+    ///      malformed array fails fast and the user does not eat DEX slippage.
+    ///      The `swapOutput >= floor0` check is post-swap (it depends on output).
     ///      On-chain invariants:
-    ///        - buckets non-empty
-    ///        - strictly ascending by `rewardAmount`
-    ///        - `swapOutput >= buckets[0].rewardAmount`
-    ///        - `baseReward.tokens.length == 1 && token == outputToken && amount == 0`
-    ///        - `baseReward.nativeAmount == 0`
-    ///        - `baseReward.creator != 0` and `baseReward.prover != 0`
-    ///        - sweepRecipient not self, not Portal
+    ///        - buckets non-empty                            → EmptyBuckets
+    ///        - strictly ascending by `rewardAmount`         → BucketsNotAscending
+    ///        - `swapOutput >= buckets[0].rewardAmount`      → SwapOutputBelowMinBucket
+    ///        - `baseReward.nativeAmount == 0`               → RewardNativeAmountNotZero
+    ///        - `baseReward.tokens.length == 1`              → RewardMustHaveOneToken
+    ///        - `baseReward.tokens[0].token == outputToken`  → RewardTokenMismatch
+    ///        - `baseReward.tokens[0].amount == 0`           → RewardPlaceholderAmountNotZero
+    ///        - `baseReward.creator != 0`                    → InvalidRewardCreator
+    ///        - `baseReward.prover != 0`                     → InvalidRewardProver
+    ///        - sweepRecipient not self, not Portal          → InvalidSweepRecipient
     /// @param inputToken      ERC20 token to pull from the caller.
     /// @param inputAmount     Amount of inputToken to pull (must be > 0).
     /// @param outputToken     ERC20 token expected from the swap (reward token).
