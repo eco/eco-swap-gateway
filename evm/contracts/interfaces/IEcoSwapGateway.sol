@@ -29,10 +29,15 @@ struct IntentParams {
     RouteType routeType;
 }
 
-/// @notice A pre-published intent variant the helper can fund by selecting it
-///         based on actual swap output. `routeHash` must identify an intent the
-///         Solver already published via `Portal::publish`; `rewardAmount` is the
-///         stablecoin amount this bucket promises to lock as reward on source.
+/// @notice A candidate intent the helper can fund by selecting it based on
+///         actual swap output. `routeHash` is the hash of a Route the caller
+///         has committed to off-chain; `rewardAmount` is the stablecoin amount
+///         this bucket locks as reward on source.
+/// @dev Portal.fund derives the vault deterministically from
+///      (destination, routeHash, reward) and does not require the intent to
+///      have been previously published. Publishing is a solver-side concern
+///      (it makes the full Route bytes indexable via IntentPublished events),
+///      not a precondition for the gateway.
 struct Bucket {
     bytes32 routeHash;
     uint256 rewardAmount;
@@ -105,11 +110,15 @@ interface IEcoSwapGateway {
     ) external payable returns (bytes32 intentHash);
 
     /// @notice Executes swap calls, measures the output delta, floor-selects a
-    ///         pre-published bucket, and funds it via `Portal.fund` with
-    ///         `allowPartial=true` (so a front-run funding becomes a no-op).
-    /// @dev The Solver must have already called `Portal.publish` for each
-    ///      bucket's `routeHash` before the user signs this tx. Surplus
-    ///      (`swapOutput - buckets[k].rewardAmount`) is swept to `sweepRecipient`.
+    ///         bucket whose `rewardAmount <= swapOutput`, and funds it via
+    ///         `Portal.fund` with `allowPartial=true` (so a front-run funding
+    ///         becomes a no-op).
+    /// @dev Funding is deterministic in `(destination, routeHash, reward)` —
+    ///      the bucket's intent does *not* need to be published beforehand.
+    ///      Solvers typically observe `IntentSelected` (or pre-publish candidate
+    ///      routes) to discover the full Route bytes needed for fulfillment.
+    ///      Surplus (`swapOutput - buckets[k].rewardAmount`) is swept to
+    ///      `sweepRecipient`.
     ///      Bucket structural invariants are validated *before* the swap so a
     ///      malformed array fails fast and the user does not eat DEX slippage.
     ///      The `swapOutput >= floor0` check is post-swap (it depends on output).

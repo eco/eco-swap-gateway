@@ -2,13 +2,19 @@
  * EcoSwapGateway Bucketed Example: PEPE → USDC on BSC, then USDC on BSC → USDC on Base
  *
  * Demonstrates the bucketed flow:
- *   1. Solver pre-publishes N candidate intents via Portal.publish (off-chain)
- *   2. User signs a single tx calling swapAndSelectIntent with the bucket list
- *   3. Helper floor-selects the bucket matching actual swap output and calls Portal.fund
- *   4. Surplus (swapOutput − bucket.rewardAmount) is swept to sweepRecipient
+ *   1. Build N candidate routes + their routeHashes
+ *   2. (Optional) Publish candidates via Portal.publish so solvers can index
+ *      the full Route bytes via IntentPublished events
+ *   3. User signs a single tx calling swapAndSelectIntent with the bucket list
+ *   4. Helper floor-selects the bucket matching actual swap output and calls Portal.fund
+ *   5. Surplus (swapOutput − bucket.rewardAmount) is swept to sweepRecipient
  *
- * In production the pre-publish step lives in eco-solver; this script ships a
- * reference implementation for dev-loop testing and integration examples.
+ * Step 2 is NOT required by the gateway — Portal.fund derives the vault
+ * deterministically from (destination, routeHash, reward) and accepts funding
+ * for an unpublished intent. It is shown here because solvers still need the
+ * full Route bytes to fulfill on the destination chain; pre-publishing is the
+ * simplest way to expose them. In production a solver may index from a
+ * different channel (API, mempool observation, IntentSelected event).
  *
  * Usage:
  *   PRIVATE_KEY=0x... ECO_SWAP_GATEWAY_ADDRESS=0x... PORTAL_BSC=0x... \
@@ -132,9 +138,11 @@ function buildBucketEntries(
 }
 
 /**
- * Solver-side: publish each bucket's intent via Portal.publish. Portal emits
- * an IntentPublished event per call; fillers index these events and wait to
- * see which one gets funded.
+ * Publish each bucket's intent via Portal.publish so solvers can index the
+ * full Route bytes via IntentPublished events. This step is OPTIONAL — the
+ * gateway's Portal.fund call works fine against unpublished intents — but
+ * solvers still need the Route bytes to fulfill on the destination chain,
+ * and pre-publishing is the simplest discovery channel.
  */
 async function solverPrePublish(
   walletClient: ReturnType<typeof createWalletClient>,

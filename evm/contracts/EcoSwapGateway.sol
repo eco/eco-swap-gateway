@@ -16,9 +16,11 @@ import {IEcoSwapGateway, IntentParams, RouteType, Bucket} from "./interfaces/IEc
 ///         Exposes two flows:
 ///           1. `swapAndCreateIntent` — publish + fund a fresh intent whose
 ///              reward equals the full swap output (surplus-free).
-///           2. `swapAndSelectIntent` — fund exactly one of several pre-published
-///              candidate intents (buckets). Reward equals the selected bucket's
-///              amount (≤ swap output); surplus is swept to `sweepRecipient`.
+///           2. `swapAndSelectIntent` — fund exactly one of several candidate
+///              intents (buckets). Reward equals the selected bucket's amount
+///              (≤ swap output); surplus is swept to `sweepRecipient`. Funding
+///              is deterministic in `(destination, routeHash, reward)`, so the
+///              selected intent does not need to have been published first.
 /// @dev Does not support fee-on-transfer tokens as outputToken.
 ///      Supports both EVM and SVM destination routes via RouteType.
 contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
