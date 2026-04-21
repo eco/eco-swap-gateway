@@ -6,7 +6,8 @@
   "scripts": {
     "build": "forge build",
     "test": "forge test -vv",
-    "swap-intent": "tsx script/swapAndCreateIntent.ts"
+    "swap-create": "tsx script/swapAndCreateIntent.ts",
+    "swap-select": "tsx script/swapAndSelectIntent.ts"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
