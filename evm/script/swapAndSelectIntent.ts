@@ -67,8 +67,10 @@ import { quoterV2Abi } from "./abi/quoterV2.js";
 
 const DOGE_INPUT_HUMAN = process.env.DOGE_INPUT ?? "0.5"; // default 0.5 DOGE
 const NUM_BUCKETS = 6;
-// Buckets span ±BAND_BPS around the live quote's central estimate.
-const BAND_BPS = 2000n; // ±20%
+// Buckets span [usdcMinOut, usdcCentral] — pessimistic rungs anchored by the
+// swap's slippage floor on the low end and by the live quote on the high end.
+// The top bucket's floor is the exact quote, so a swap that lands at the quote
+// selects the richest bucket; anything below picks a lower rung.
 const SLIPPAGE_TOLERANCE = new sdkCore.Percent(100, 10_000); // 1% on each Uniswap leg
 const ROUTE_TTL_SECONDS = 3600n;
 const REWARD_TTL_SECONDS = 7200n;
@@ -288,12 +290,22 @@ function buildRoute(
 async function buildBucketEntries(
   baseClient: PublicClient,
   user: Address,
-  centerUsdcSource: bigint, // 18-dec on BSC
+  quoteUsdcSource: bigint, // live quote — top-bucket floor (18-dec on BSC)
+  minUsdcSource: bigint, // swap's amountOutMinimum — bottom-bucket floor
   baseReward: Omit<Reward, "tokens">,
   routeDeadline: bigint,
 ): Promise<BucketEntry[]> {
-  const minReward = (centerUsdcSource * (10_000n - BAND_BPS)) / 10_000n;
-  const maxReward = (centerUsdcSource * (10_000n + BAND_BPS)) / 10_000n;
+  if (minUsdcSource >= quoteUsdcSource) {
+    throw new Error(
+      `minUsdcSource (${minUsdcSource}) must be strictly less than quoteUsdcSource (${quoteUsdcSource})`,
+    );
+  }
+  // Pessimistic rungs: bucket[0] = worst-case swap output (slippage floor),
+  // bucket[N-1] = exact live quote. N-2 of N rungs sit below the quote, so most
+  // outcomes select a below-quote bucket; only a swap at-or-above the quote
+  // lands on the top bucket.
+  const minReward = minUsdcSource;
+  const maxReward = quoteUsdcSource;
 
   const entries: BucketEntry[] = [];
   for (let i = 0; i < NUM_BUCKETS; i++) {
@@ -709,10 +721,12 @@ async function main() {
     inputAmount,
   );
 
-  // 2. Build N buckets around the central USDC quote; each bucket's destination
-  //    route carries a fresh USDC → TOSHI quote with tight amountOutMinimum.
+  // 2. Build N buckets spanning [minOut, quote] — pessimistic floors anchored
+  //    by the slippage floor on the low end and the live quote on the high end.
+  //    Each bucket's destination route carries a fresh USDC → TOSHI quote with
+  //    tight amountOutMinimum.
   console.log(
-    `Building ${NUM_BUCKETS} buckets ±${BAND_BPS}bps around center (fee: ${FEE_BPS}bps scalar + ${FLAT_FEE_SOURCE} flat)…`,
+    `Building ${NUM_BUCKETS} buckets over [minOut, quote] (fee: ${FEE_BPS}bps scalar + ${FLAT_FEE_SOURCE} flat)…`,
   );
   const baseReward: Omit<Reward, "tokens"> = {
     deadline: rewardDeadline,
@@ -724,6 +738,7 @@ async function main() {
     clients.basePublic,
     clients.account.address,
     usdcCentral,
+    usdcMinOut,
     baseReward,
     routeDeadline,
   );
