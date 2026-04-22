@@ -11,7 +11,7 @@ import {TestERC20} from "eco-routes/contracts/test/TestERC20.sol";
 
 import {EcoSwapGateway} from "../contracts/EcoSwapGateway.sol";
 import {IEcoSwapGateway, IntentParams, RouteType, Bucket} from "../contracts/interfaces/IEcoSwapGateway.sol";
-import {MockDEX, ReentrantDEX} from "./mocks/MockDEX.sol";
+import {MockDEX, MockETHDEX, ReentrantDEX} from "./mocks/MockDEX.sol";
 
 contract EcoSwapGatewayTest is Test {
     EcoSwapGateway public ecoSwapGateway;
@@ -203,7 +203,7 @@ contract EcoSwapGatewayTest is Test {
 
     // ─── Input validation ────────────────────────────────────────
 
-    function test_revert_zeroInputAmount() public {
+    function test_revert_zeroInputAmount_zeroValue() public {
         IntentParams memory intent = _defaultIntentParams();
         Call[] memory calls = _buildSwapCalls(SWAP_AMOUNT);
 
@@ -214,6 +214,40 @@ contract EcoSwapGatewayTest is Test {
             address(inputToken), 0, address(outputToken), calls, intent, user
         );
         vm.stopPrank();
+    }
+
+    function test_nativeETHInput() public {
+        MockETHDEX ethDex = new MockETHDEX(address(outputToken));
+        outputToken.mint(address(ethDex), 2 ether);
+
+        uint256 ethAmount = 1 ether;
+        Call[] memory calls = new Call[](1);
+        calls[0] = Call({
+            target: address(ethDex),
+            data: abi.encodeWithSelector(MockETHDEX.swapETH.selector),
+            value: ethAmount
+        });
+
+        IntentParams memory intent = _defaultIntentParams();
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
+        intent.flatFee = 0;
+
+        vm.deal(user, ethAmount);
+        vm.startPrank(user);
+        bytes32 intentHash = ecoSwapGateway.swapAndCreateIntent{value: ethAmount}(
+            address(inputToken), // valid ERC20 for cleanup; no tokens pulled
+            0, // no ERC20 pull — ETH is the input
+            address(outputToken),
+            calls,
+            intent,
+            user
+        );
+        vm.stopPrank();
+
+        assertTrue(intentHash != bytes32(0));
+        assertEq(user.balance, 0);
+        assertEq(address(ecoSwapGateway).balance, 0);
     }
 
     function test_sweepRecipient_zeroDefaultsToMsgSender() public {

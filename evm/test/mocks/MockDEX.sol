@@ -34,6 +34,22 @@ contract MockDEX {
     }
 }
 
+/// @notice DEX mock that accepts native ETH and returns output tokens at 1:1.
+contract MockETHDEX {
+    using SafeERC20 for IERC20;
+
+    IERC20 public immutable OUTPUT_TOKEN;
+
+    constructor(address _outputToken) {
+        OUTPUT_TOKEN = IERC20(_outputToken);
+    }
+
+    function swapETH() external payable returns (uint256 amountOut) {
+        amountOut = msg.value;
+        OUTPUT_TOKEN.safeTransfer(msg.sender, amountOut);
+    }
+}
+
 /// @notice DEX mock that attempts to re-enter EcoSwapGateway during swap.
 contract ReentrantDEX {
     EcoSwapGateway public immutable TARGET;

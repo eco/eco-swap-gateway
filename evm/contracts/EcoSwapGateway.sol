@@ -186,8 +186,10 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         address outputToken,
         Call[] calldata swapCalls
     ) internal returns (uint256 swapOutput) {
-        if (inputAmount == 0) revert InvalidInputAmount();
-        IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
+        if (inputAmount == 0 && msg.value == 0) revert InvalidInputAmount();
+        if (inputAmount > 0) {
+            IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
+        }
 
         uint256 preBalance = IERC20(outputToken).balanceOf(address(this));
 

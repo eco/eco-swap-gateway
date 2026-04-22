@@ -92,8 +92,11 @@ interface IEcoSwapGateway {
     ///      must include token approval calls (e.g., `inputToken.approve(dex, amount)`)
     ///      in `swapCalls` — the contract does not pre-approve any targets.
     ///      Supports both EVM and SVM destination routes via `RouteType`.
-    /// @param inputToken      ERC20 token to pull from the caller.
-    /// @param inputAmount     Amount of inputToken to pull (must be > 0).
+    /// @param inputToken      ERC20 token to pull from the caller. When swapping
+    ///                        from native ETH, pass a valid ERC20 address (e.g. WETH)
+    ///                        with `inputAmount = 0` and send ETH via `msg.value`.
+    /// @param inputAmount     Amount of inputToken to pull. 0 is allowed when
+    ///                        `msg.value > 0` (native ETH input via swapCalls).
     /// @param outputToken     ERC20 token expected from the swap (reward token).
     /// @param swapCalls       Arbitrary calls for swap execution (approve, swap, etc.).
     /// @param intent          Intent creation parameters (including route template + offsets).
@@ -133,8 +136,11 @@ interface IEcoSwapGateway {
     ///        - `baseReward.creator != 0`                    → InvalidRewardCreator
     ///        - `baseReward.prover != 0`                     → InvalidRewardProver
     ///        - sweepRecipient not self, not Portal          → InvalidSweepRecipient
-    /// @param inputToken      ERC20 token to pull from the caller.
-    /// @param inputAmount     Amount of inputToken to pull (must be > 0).
+    /// @param inputToken      ERC20 token to pull from the caller. When swapping
+    ///                        from native ETH, pass a valid ERC20 address (e.g. WETH)
+    ///                        with `inputAmount = 0` and send ETH via `msg.value`.
+    /// @param inputAmount     Amount of inputToken to pull. 0 is allowed when
+    ///                        `msg.value > 0` (native ETH input via swapCalls).
     /// @param outputToken     ERC20 token expected from the swap (reward token).
     /// @param swapCalls       Arbitrary swap calls.
     /// @param destination     Destination chain ID.
