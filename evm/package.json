@@ -7,7 +7,9 @@
     "build": "forge build",
     "test": "forge test -vv",
     "swap-create": "tsx script/swapAndCreateIntent.ts",
-    "swap-select": "tsx script/swapAndSelectIntent.ts"
+    "swap-select": "tsx script/swapAndSelectIntent.ts",
+    "swap-create-bnb-eth": "tsx script/swapAndCreateIntent_BNB_ETH.ts",
+    "swap-select-bnb-eth": "tsx script/swapAndSelectIntent_BNB_ETH.ts"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
