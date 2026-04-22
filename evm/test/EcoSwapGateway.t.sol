@@ -11,7 +11,7 @@ import {TestERC20} from "eco-routes/contracts/test/TestERC20.sol";
 
 import {EcoSwapGateway} from "../contracts/EcoSwapGateway.sol";
 import {IEcoSwapGateway, IntentParams, RouteType, Bucket} from "../contracts/interfaces/IEcoSwapGateway.sol";
-import {MockDEX, MockETHDEX, ReentrantDEX} from "./mocks/MockDEX.sol";
+import {MockDEX, MockETHDEX, MockTokenToETHDEX, ReentrantDEX} from "./mocks/MockDEX.sol";
 
 contract EcoSwapGatewayTest is Test {
     EcoSwapGateway public ecoSwapGateway;
@@ -236,8 +236,8 @@ contract EcoSwapGatewayTest is Test {
         vm.deal(user, ethAmount);
         vm.startPrank(user);
         bytes32 intentHash = ecoSwapGateway.swapAndCreateIntent{value: ethAmount}(
-            address(inputToken), // valid ERC20 for cleanup; no tokens pulled
-            0, // no ERC20 pull — ETH is the input
+            address(0), // address(0) signals native ETH input
+            0, // inputAmount ignored for native
             address(outputToken),
             calls,
             intent,
@@ -248,6 +248,56 @@ contract EcoSwapGatewayTest is Test {
         assertTrue(intentHash != bytes32(0));
         assertEq(user.balance, 0);
         assertEq(address(ecoSwapGateway).balance, 0);
+    }
+
+    function test_nativeETHOutput() public {
+        // ERC20 input → ETH output: fund a MockTokenToETHDEX that swaps 1:1.
+        MockTokenToETHDEX ethOut = new MockTokenToETHDEX(address(inputToken));
+        vm.deal(address(ethOut), 2 ether);
+
+        Call[] memory calls = new Call[](2);
+        calls[0] = Call({
+            target: address(inputToken),
+            data: abi.encodeWithSelector(IERC20.approve.selector, address(ethOut), SWAP_AMOUNT),
+            value: 0
+        });
+        calls[1] = Call({
+            target: address(ethOut),
+            data: abi.encodeWithSelector(MockTokenToETHDEX.swapForETH.selector, SWAP_AMOUNT),
+            value: 0
+        });
+
+        IntentParams memory intent = _defaultIntentParams();
+        intent.feeNumerator = 1;
+        intent.feeDenominator = 1;
+        intent.flatFee = 0;
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        bytes32 intentHash = ecoSwapGateway.swapAndCreateIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(0), // native ETH output
+            calls,
+            intent,
+            user
+        );
+        vm.stopPrank();
+
+        assertTrue(intentHash != bytes32(0));
+        // Gateway forwarded swapOutput ETH to Portal → balance back to 0
+        assertEq(address(ecoSwapGateway).balance, 0);
+    }
+
+    function test_revert_nativeInput_zeroValue() public {
+        IntentParams memory intent = _defaultIntentParams();
+        Call[] memory calls = _buildSwapCalls(SWAP_AMOUNT);
+
+        vm.prank(user);
+        vm.expectRevert(IEcoSwapGateway.InvalidInputAmount.selector);
+        ecoSwapGateway.swapAndCreateIntent(
+            address(0), 0, address(outputToken), calls, intent, user
+        );
     }
 
     function test_sweepRecipient_zeroDefaultsToMsgSender() public {
@@ -983,14 +1033,35 @@ contract EcoSwapGatewayTest is Test {
         });
     }
 
+    function _baseRewardNative() internal view returns (Reward memory reward) {
+        reward = Reward({
+            deadline: uint64(block.timestamp + 3600),
+            creator: user,
+            prover: prover,
+            nativeAmount: 0,
+            tokens: new TokenAmount[](0)
+        });
+    }
+
     function _rewardFor(uint256 amount) internal view returns (Reward memory reward) {
         reward = _baseReward();
         reward.tokens[0].amount = amount;
     }
 
+    function _rewardForNative(uint256 amount) internal view returns (Reward memory reward) {
+        reward = _baseRewardNative();
+        reward.nativeAmount = amount;
+    }
+
     function _bucketFor(uint256 amount) internal view returns (Bucket memory bucket) {
         bytes memory route = _buildRouteForAmount(amount);
         (, bytes32 routeHash,) = portal.getIntentHash(uint64(1), route, _rewardFor(amount));
+        bucket = Bucket({routeHash: routeHash, rewardAmount: amount});
+    }
+
+    function _bucketForNative(uint256 amount) internal view returns (Bucket memory bucket) {
+        bytes memory route = _buildRouteForAmount(amount);
+        (, bytes32 routeHash,) = portal.getIntentHash(uint64(1), route, _rewardForNative(amount));
         bucket = Bucket({routeHash: routeHash, rewardAmount: amount});
     }
 
@@ -1355,6 +1426,113 @@ contract EcoSwapGatewayTest is Test {
         address vault = portal.intentVaultAddress(1, route, _rewardFor(700_000));
         assertEq(outputToken.balanceOf(vault), 700_000);
         assertEq(outputToken.balanceOf(user), SWAP_AMOUNT - 700_000);
+    }
+
+    // ─── Native ETH reward (outputToken == address(0)) ────────────
+
+    function _buildEthOutSwapCalls(MockTokenToETHDEX ethOut, uint256 amount)
+        internal
+        view
+        returns (Call[] memory)
+    {
+        Call[] memory calls = new Call[](2);
+        calls[0] = Call({
+            target: address(inputToken),
+            data: abi.encodeWithSelector(IERC20.approve.selector, address(ethOut), amount),
+            value: 0
+        });
+        calls[1] = Call({
+            target: address(ethOut),
+            data: abi.encodeWithSelector(MockTokenToETHDEX.swapForETH.selector, amount),
+            value: 0
+        });
+        return calls;
+    }
+
+    function test_select_ethOutput() public {
+        MockTokenToETHDEX ethOut = new MockTokenToETHDEX(address(inputToken));
+        vm.deal(address(ethOut), 2 ether);
+
+        // Mint extra input so the swap can produce enough ETH to fill buckets.
+        uint256 amountIn = 2 ether;
+        inputToken.mint(user, amountIn);
+
+        Bucket[] memory buckets = new Bucket[](2);
+        buckets[0] = _bucketForNative(0.5 ether);
+        buckets[1] = _bucketForNative(1.5 ether); // floor for swapOutput = 2 ETH
+
+        Reward memory baseReward = _baseRewardNative();
+        address recipient = makeAddr("ethRecipient");
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), amountIn);
+        bytes32 intentHash = ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            amountIn,
+            address(0), // native ETH reward
+            _buildEthOutSwapCalls(ethOut, amountIn),
+            uint64(1),
+            baseReward,
+            buckets,
+            recipient
+        );
+        vm.stopPrank();
+
+        assertTrue(intentHash != bytes32(0));
+        assertEq(address(ecoSwapGateway).balance, 0);
+        // Surplus (2 - 1.5 = 0.5 ETH) swept to recipient.
+        assertEq(recipient.balance, 0.5 ether);
+        // Vault holds exactly the bucket's rewardAmount in ETH.
+        bytes memory route = _buildRouteForAmount(1.5 ether);
+        address vault = portal.intentVaultAddress(1, route, _rewardForNative(1.5 ether));
+        assertEq(vault.balance, 1.5 ether);
+    }
+
+    function test_revert_select_nativeReward_hasTokens() public {
+        // outputToken = address(0) requires tokens.length == 0.
+        Bucket[] memory buckets = new Bucket[](1);
+        buckets[0] = _bucketForNative(0.5 ether);
+
+        Reward memory baseReward = _baseReward(); // has a token — wrong for native path
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.RewardMustHaveNoTokens.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(0),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
+    }
+
+    function test_revert_select_nativeReward_nonZeroPlaceholder() public {
+        // Native placeholder (nativeAmount) must be 0 before the helper fills it.
+        Bucket[] memory buckets = new Bucket[](1);
+        buckets[0] = _bucketForNative(0.5 ether);
+
+        Reward memory baseReward = _baseRewardNative();
+        baseReward.nativeAmount = 1;
+
+        vm.startPrank(user);
+        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
+        vm.expectRevert(IEcoSwapGateway.RewardPlaceholderAmountNotZero.selector);
+        ecoSwapGateway.swapAndSelectIntent(
+            address(inputToken),
+            SWAP_AMOUNT,
+            address(0),
+            _buildSwapCalls(SWAP_AMOUNT),
+            uint64(1),
+            baseReward,
+            buckets,
+            user
+        );
+        vm.stopPrank();
     }
 
     function test_preSwapValidation_emptyBucketsSkipsSwap() public {

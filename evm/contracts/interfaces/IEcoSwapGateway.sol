@@ -78,6 +78,7 @@ interface IEcoSwapGateway {
     // Base-reward validation — split so integrators see which field failed.
     error RewardNativeAmountNotZero();
     error RewardMustHaveOneToken();
+    error RewardMustHaveNoTokens();
     error RewardTokenMismatch();
     error RewardPlaceholderAmountNotZero();
 
@@ -91,12 +92,13 @@ interface IEcoSwapGateway {
     ///      must include token approval calls (e.g., `inputToken.approve(dex, amount)`)
     ///      in `swapCalls` — the contract does not pre-approve any targets.
     ///      Supports both EVM and SVM destination routes via `RouteType`.
-    /// @param inputToken      ERC20 token to pull from the caller. When swapping
-    ///                        from native ETH, pass a valid ERC20 address (e.g. WETH)
-    ///                        with `inputAmount = 0` and send ETH via `msg.value`.
-    /// @param inputAmount     Amount of inputToken to pull. 0 is allowed when
-    ///                        `msg.value > 0` (native ETH input via swapCalls).
-    /// @param outputToken     ERC20 token expected from the swap (reward token).
+    /// @param inputToken      ERC20 token to pull from the caller, or `address(0)`
+    ///                        to signal native ETH input (amount is `msg.value`).
+    /// @param inputAmount     Amount of inputToken to pull. Must be > 0 for ERC20
+    ///                        input; ignored when `inputToken == address(0)`.
+    /// @param outputToken     ERC20 token expected from the swap (reward token),
+    ///                        or `address(0)` to signal a native ETH reward
+    ///                        (measured via `address(this).balance` delta).
     /// @param swapCalls       Arbitrary calls for swap execution (approve, swap, etc.).
     /// @param intent          Intent creation parameters (including route template + offsets).
     /// @param sweepRecipient  Address to receive residual tokens and ETH.
@@ -128,23 +130,32 @@ interface IEcoSwapGateway {
     ///        - buckets non-empty                            → EmptyBuckets
     ///        - strictly ascending by `rewardAmount`         → BucketsNotAscending
     ///        - `swapOutput >= buckets[0].rewardAmount`      → SwapOutputBelowMinBucket
+    ///        - `baseReward.creator != 0`                    → InvalidRewardCreator
+    ///        - `baseReward.prover != 0`                     → InvalidRewardProver
+    ///        - sweepRecipient not self, not Portal          → InvalidSweepRecipient
+    ///      ERC20 reward (outputToken != 0):
     ///        - `baseReward.nativeAmount == 0`               → RewardNativeAmountNotZero
     ///        - `baseReward.tokens.length == 1`              → RewardMustHaveOneToken
     ///        - `baseReward.tokens[0].token == outputToken`  → RewardTokenMismatch
     ///        - `baseReward.tokens[0].amount == 0`           → RewardPlaceholderAmountNotZero
-    ///        - `baseReward.creator != 0`                    → InvalidRewardCreator
-    ///        - `baseReward.prover != 0`                     → InvalidRewardProver
-    ///        - sweepRecipient not self, not Portal          → InvalidSweepRecipient
-    /// @param inputToken      ERC20 token to pull from the caller. When swapping
-    ///                        from native ETH, pass a valid ERC20 address (e.g. WETH)
-    ///                        with `inputAmount = 0` and send ETH via `msg.value`.
-    /// @param inputAmount     Amount of inputToken to pull. 0 is allowed when
-    ///                        `msg.value > 0` (native ETH input via swapCalls).
-    /// @param outputToken     ERC20 token expected from the swap (reward token).
+    ///      Native reward (outputToken == 0):
+    ///        - `baseReward.tokens.length == 0`              → RewardMustHaveNoTokens
+    ///        - `baseReward.nativeAmount == 0`               → RewardPlaceholderAmountNotZero
+    /// @param inputToken      ERC20 token to pull from the caller, or `address(0)`
+    ///                        to signal native ETH input (amount is `msg.value`).
+    /// @param inputAmount     Amount of inputToken to pull. Must be > 0 for ERC20
+    ///                        input; ignored when `inputToken == address(0)`.
+    /// @param outputToken     ERC20 token expected from the swap (reward token),
+    ///                        or `address(0)` to signal a native ETH reward
+    ///                        (measured via `address(this).balance` delta).
     /// @param swapCalls       Arbitrary swap calls.
     /// @param destination     Destination chain ID.
-    /// @param baseReward      Reward template; tokens[0].amount is the placeholder
-    ///                        the helper overwrites with the selected bucket's amount.
+    /// @param baseReward      Reward template. For ERC20 rewards the placeholder
+    ///                        is `tokens[0].amount` (with `tokens.length == 1`);
+    ///                        for native rewards (`outputToken == address(0)`)
+    ///                        the placeholder is `nativeAmount` (with an empty
+    ///                        `tokens` array). The helper overwrites it with the
+    ///                        selected bucket's amount.
     /// @param buckets         Pre-published intent candidates, strictly ascending.
     /// @param sweepRecipient  Address to receive residual input/output tokens, surplus, and ETH.
     ///                        Pass `address(0)` to default to `msg.sender`.
