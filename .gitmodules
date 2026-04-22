@@ -1,0 +1,9 @@
+[submodule "evm/lib/forge-std"]
+	path = evm/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "evm/lib/eco-routes"]
+	path = evm/lib/eco-routes
+	url = git@github.com:eco/eco-routes.git
+[submodule "evm/lib/openzeppelin-contracts"]
+	path = evm/lib/openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts
