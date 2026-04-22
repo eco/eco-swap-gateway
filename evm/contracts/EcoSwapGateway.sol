@@ -107,11 +107,16 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         uint256 rewardAmount = buckets[k].rewardAmount;
 
         // 4. Clone the reward template with the bucket's amount.
-        Reward memory reward = _cloneRewardWithAmount(baseReward, rewardAmount);
+        Reward memory reward = _cloneRewardWithAmount(baseReward, outputToken, rewardAmount);
 
         // 5. Fund the selected intent (allowPartial=true → front-run funding is a no-op).
-        IERC20(outputToken).forceApprove(address(PORTAL), rewardAmount);
-        intentHash = PORTAL.fund(destination, buckets[k].routeHash, reward, true);
+        uint256 nativeValue;
+        if (outputToken == address(0)) {
+            nativeValue = rewardAmount;
+        } else {
+            IERC20(outputToken).forceApprove(address(PORTAL), rewardAmount);
+        }
+        intentHash = PORTAL.fund{value: nativeValue}(destination, buckets[k].routeHash, reward, true);
 
         // 6. Emit selection event with bucketsHash for audit.
         emit IntentSelected(
@@ -125,10 +130,16 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
     function _validateBaseReward(Reward calldata baseReward, address outputToken) internal pure {
         if (baseReward.creator == address(0)) revert InvalidRewardCreator();
         if (baseReward.prover == address(0)) revert InvalidRewardProver();
-        if (baseReward.nativeAmount != 0) revert RewardNativeAmountNotZero();
-        if (baseReward.tokens.length != 1) revert RewardMustHaveOneToken();
-        if (baseReward.tokens[0].token != outputToken) revert RewardTokenMismatch();
-        if (baseReward.tokens[0].amount != 0) revert RewardPlaceholderAmountNotZero();
+        if (outputToken == address(0)) {
+            // Native ETH reward: placeholder is nativeAmount; tokens[] must be empty.
+            if (baseReward.tokens.length != 0) revert RewardMustHaveNoTokens();
+            if (baseReward.nativeAmount != 0) revert RewardPlaceholderAmountNotZero();
+        } else {
+            if (baseReward.nativeAmount != 0) revert RewardNativeAmountNotZero();
+            if (baseReward.tokens.length != 1) revert RewardMustHaveOneToken();
+            if (baseReward.tokens[0].token != outputToken) revert RewardTokenMismatch();
+            if (baseReward.tokens[0].amount != 0) revert RewardPlaceholderAmountNotZero();
+        }
     }
 
     /// @dev Validates non-empty + strictly ascending. Safe to call pre-swap
@@ -162,20 +173,32 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         }
     }
 
-    function _cloneRewardWithAmount(Reward calldata baseReward, uint256 amount)
+    /// @dev Clone the base reward template with `amount` filled into either the
+    ///      native slot (if `outputToken == address(0)`) or the single-token slot.
+    function _cloneRewardWithAmount(Reward calldata baseReward, address outputToken, uint256 amount)
         internal
         pure
         returns (Reward memory reward)
     {
-        TokenAmount[] memory tokens = new TokenAmount[](1);
-        tokens[0] = TokenAmount({token: baseReward.tokens[0].token, amount: amount});
-        reward = Reward({
-            deadline: baseReward.deadline,
-            creator: baseReward.creator,
-            prover: baseReward.prover,
-            nativeAmount: 0,
-            tokens: tokens
-        });
+        if (outputToken == address(0)) {
+            reward = Reward({
+                deadline: baseReward.deadline,
+                creator: baseReward.creator,
+                prover: baseReward.prover,
+                nativeAmount: amount,
+                tokens: new TokenAmount[](0)
+            });
+        } else {
+            TokenAmount[] memory tokens = new TokenAmount[](1);
+            tokens[0] = TokenAmount({token: baseReward.tokens[0].token, amount: amount});
+            reward = Reward({
+                deadline: baseReward.deadline,
+                creator: baseReward.creator,
+                prover: baseReward.prover,
+                nativeAmount: 0,
+                tokens: tokens
+            });
+        }
     }
 
     // --- Internal helpers ---
@@ -186,12 +209,15 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         address outputToken,
         Call[] calldata swapCalls
     ) internal returns (uint256 swapOutput) {
-        if (inputAmount == 0 && msg.value == 0) revert InvalidInputAmount();
-        if (inputAmount > 0) {
+        if (inputToken == address(0)) {
+            // Native ETH input — amount is msg.value; nothing to pull.
+            if (msg.value == 0) revert InvalidInputAmount();
+        } else {
+            if (inputAmount == 0) revert InvalidInputAmount();
             IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
         }
 
-        uint256 preBalance = IERC20(outputToken).balanceOf(address(this));
+        uint256 preBalance = _outputBalance(outputToken);
 
         for (uint256 i; i < swapCalls.length; ++i) {
             (bool success, bytes memory returnData) =
@@ -199,8 +225,16 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
             if (!success) revert CallFailed(i, returnData);
         }
 
-        swapOutput = IERC20(outputToken).balanceOf(address(this)) - preBalance;
+        swapOutput = _outputBalance(outputToken) - preBalance;
         if (swapOutput == 0) revert InsufficientSwapOutput();
+    }
+
+    /// @dev Balance of `outputToken` held by this contract. `address(0)` signals
+    ///      native ETH, in which case this returns `address(this).balance`.
+    function _outputBalance(address outputToken) internal view returns (uint256) {
+        return outputToken == address(0)
+            ? address(this).balance
+            : IERC20(outputToken).balanceOf(address(this));
     }
 
     function _buildRoute(uint256 swapOutput, IntentParams calldata intent)
@@ -230,18 +264,34 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         bytes memory route,
         IntentParams calldata intent
     ) internal returns (bytes32 intentHash) {
-        TokenAmount[] memory tokens = new TokenAmount[](1);
-        tokens[0] = TokenAmount({token: outputToken, amount: swapOutput});
-        Reward memory reward = Reward({
-            deadline: intent.rewardDeadline,
-            creator: intent.rewardCreator,
-            prover: intent.rewardProver,
-            nativeAmount: 0,
-            tokens: tokens
-        });
+        Reward memory reward;
+        uint256 nativeValue;
+        if (outputToken == address(0)) {
+            // Native ETH reward: carried in `reward.nativeAmount` + msg.value.
+            reward = Reward({
+                deadline: intent.rewardDeadline,
+                creator: intent.rewardCreator,
+                prover: intent.rewardProver,
+                nativeAmount: swapOutput,
+                tokens: new TokenAmount[](0)
+            });
+            nativeValue = swapOutput;
+        } else {
+            TokenAmount[] memory tokens = new TokenAmount[](1);
+            tokens[0] = TokenAmount({token: outputToken, amount: swapOutput});
+            reward = Reward({
+                deadline: intent.rewardDeadline,
+                creator: intent.rewardCreator,
+                prover: intent.rewardProver,
+                nativeAmount: 0,
+                tokens: tokens
+            });
+            IERC20(outputToken).forceApprove(address(PORTAL), swapOutput);
+        }
 
-        IERC20(outputToken).forceApprove(address(PORTAL), swapOutput);
-        (intentHash,) = PORTAL.publishAndFund(intent.destination, route, reward, intent.allowPartial);
+        (intentHash,) = PORTAL.publishAndFund{value: nativeValue}(
+            intent.destination, route, reward, intent.allowPartial
+        );
     }
 
     function _patchRoute(
@@ -287,8 +337,10 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
     ///      the happy path, since `forceApprove`+exact-amount `transferFrom`
     ///      and DEX swaps consume exactly what was approved).
     function _cleanup(address inputToken, address outputToken, address to) internal {
-        _sweepToken(inputToken, to);
-        _sweepToken(outputToken, to);
+        // address(0) signals native ETH — no ERC20 to sweep on that side;
+        // leftover ETH (surplus + refunds) is swept by _sweepETH below.
+        if (inputToken != address(0)) _sweepToken(inputToken, to);
+        if (outputToken != address(0)) _sweepToken(outputToken, to);
         _sweepETH(to);
     }
 

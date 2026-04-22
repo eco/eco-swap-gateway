@@ -50,6 +50,27 @@ contract MockETHDEX {
     }
 }
 
+/// @notice DEX mock that accepts an ERC20 input and returns native ETH at 1:1.
+///         Must be funded with ETH before use.
+contract MockTokenToETHDEX {
+    using SafeERC20 for IERC20;
+
+    IERC20 public immutable INPUT_TOKEN;
+
+    constructor(address _inputToken) {
+        INPUT_TOKEN = IERC20(_inputToken);
+    }
+
+    receive() external payable {}
+
+    function swapForETH(uint256 amountIn) external returns (uint256 amountOut) {
+        INPUT_TOKEN.safeTransferFrom(msg.sender, address(this), amountIn);
+        amountOut = amountIn;
+        (bool ok,) = msg.sender.call{value: amountOut}("");
+        require(ok, "ETH transfer failed");
+    }
+}
+
 /// @notice DEX mock that attempts to re-enter EcoSwapGateway during swap.
 contract ReentrantDEX {
     EcoSwapGateway public immutable TARGET;
