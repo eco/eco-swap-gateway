@@ -346,8 +346,10 @@ contract EcoSwapGatewayTest is Test {
 
     function test_inputTokenApprovalResetToZero() public {
         _doSwap();
-        // Approval for each swap call target should be zeroed.
-        assertEq(inputToken.allowance(address(ecoSwapGateway), address(inputToken)), 0);
+        // Happy-path invariant: the swap's `approve(dex, amount)` and subsequent
+        // `transferFrom(amount)` leave zero allowance. The contract does not
+        // explicitly reset approvals — this documents that the reference flow
+        // naturally terminates with no residue.
         assertEq(inputToken.allowance(address(ecoSwapGateway), address(dex)), 0);
     }
 
@@ -540,44 +542,6 @@ contract EcoSwapGatewayTest is Test {
         vm.startPrank(user);
         inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
         vm.expectRevert();
-        ecoSwapGateway.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
-        );
-        vm.stopPrank();
-    }
-
-    function test_revert_portalCallTarget() public {
-        Call[] memory calls = new Call[](1);
-        calls[0] = Call({
-            target: address(portal),
-            data: abi.encodeWithSelector(bytes4(keccak256("publish(uint64,bytes,Reward)"))),
-            value: 0
-        });
-        IntentParams memory intent = _defaultIntentParams();
-
-        vm.startPrank(user);
-        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
-        vm.expectRevert(abi.encodeWithSelector(IEcoSwapGateway.InvalidCallTarget.selector, address(portal)));
-        ecoSwapGateway.swapAndCreateIntent(
-            address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
-        );
-        vm.stopPrank();
-    }
-
-    function test_revert_invalidTargetNotFirstIndex() public {
-        Call[] memory calls = new Call[](2);
-        calls[0] = Call({
-            target: address(inputToken),
-            data: abi.encodeWithSelector(IERC20.approve.selector, address(dex), SWAP_AMOUNT),
-            value: 0
-        });
-        calls[1] = Call({target: address(portal), data: "", value: 0});
-
-        IntentParams memory intent = _defaultIntentParams();
-
-        vm.startPrank(user);
-        inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
-        vm.expectRevert(abi.encodeWithSelector(IEcoSwapGateway.InvalidCallTarget.selector, address(portal)));
         ecoSwapGateway.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), calls, intent, user
         );

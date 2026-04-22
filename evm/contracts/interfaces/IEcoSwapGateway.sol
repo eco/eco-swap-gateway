@@ -65,7 +65,6 @@ interface IEcoSwapGateway {
     error RouteAmountZero();
     error OffsetOutOfBounds();
     error CallFailed(uint256 index, bytes reason);
-    error InvalidCallTarget(address target);
     error InvalidPortal();
     error InvalidSweepRecipient();
     error InvalidRewardCreator();

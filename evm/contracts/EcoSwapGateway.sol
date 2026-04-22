@@ -72,7 +72,7 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         emit IntentCreated(intentHash, msg.sender, swapOutput);
 
         // 6. Cleanup: reset approvals, sweep residual tokens and ETH.
-        _cleanup(inputToken, outputToken, swapCalls, resolvedSweep);
+        _cleanup(inputToken, outputToken, resolvedSweep);
     }
 
     function _resolveSweepRecipient(address sweepRecipient) internal view returns (address resolved) {
@@ -119,7 +119,7 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         );
 
         // 7. Cleanup: reset approvals, sweep residuals + surplus.
-        _cleanup(inputToken, outputToken, swapCalls, resolvedSweep);
+        _cleanup(inputToken, outputToken, resolvedSweep);
     }
 
     function _validateBaseReward(Reward calldata baseReward, address outputToken) internal pure {
@@ -194,9 +194,6 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         uint256 preBalance = IERC20(outputToken).balanceOf(address(this));
 
         for (uint256 i; i < swapCalls.length; ++i) {
-            if (swapCalls[i].target == address(PORTAL)) {
-                revert InvalidCallTarget(swapCalls[i].target);
-            }
             (bool success, bytes memory returnData) =
                 swapCalls[i].target.call{value: swapCalls[i].value}(swapCalls[i].data);
             if (!success) revert CallFailed(i, returnData);
@@ -284,18 +281,12 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         }
     }
 
-    /// @dev Shared post-intent cleanup for F1 and F2: reset portal + per-swap-call
-    ///      approvals to zero, then sweep any residual balances to `to`.
-    function _cleanup(
-        address inputToken,
-        address outputToken,
-        Call[] calldata swapCalls,
-        address to
-    ) internal {
-        IERC20(outputToken).forceApprove(address(PORTAL), 0);
-        for (uint256 i; i < swapCalls.length; ++i) {
-            IERC20(inputToken).forceApprove(swapCalls[i].target, 0);
-        }
+    /// @dev Shared post-intent cleanup for F1 and F2: sweep residual input/output
+    ///      token balances and any leftover ETH to `to`. Portal and swap-target
+    ///      allowances are left at their natural post-consumption value (0 on
+    ///      the happy path, since `forceApprove`+exact-amount `transferFrom`
+    ///      and DEX swaps consume exactly what was approved).
+    function _cleanup(address inputToken, address outputToken, address to) internal {
         _sweepToken(inputToken, to);
         _sweepToken(outputToken, to);
         _sweepETH(to);
