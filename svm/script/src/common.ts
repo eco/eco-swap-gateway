@@ -68,6 +68,7 @@ export const DISCRIMINATOR = {
     "append_flash_fulfill_route_chunk",
   ),
   flash_fulfill: anchorDiscriminator("flash_fulfill"),
+  withdraw: anchorDiscriminator("withdraw"),
 };
 
 // ── Types (mirror the Rust definitions) ───────────────────────────────────
