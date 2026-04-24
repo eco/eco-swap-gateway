@@ -48,6 +48,7 @@ import {
 import {
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
+  TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { createHash, randomFillSync } from "node:crypto";
@@ -57,11 +58,12 @@ import {
   createWalletClient,
   encodeAbiParameters,
   encodeFunctionData,
+  encodePacked,
   erc20Abi,
   http,
   keccak256,
-  pad,
   parseEventLogs,
+  zeroAddress,
   type Address,
   type Hex,
   type PublicClient,
@@ -80,7 +82,7 @@ const sdkCore =
   require("@uniswap/sdk-core") as typeof import("@uniswap/sdk-core");
 const v3Sdk = require("@uniswap/v3-sdk") as typeof import("@uniswap/v3-sdk");
 
-import { EVMRewardAbiItem, EVMRouteAbiItem, portalAbi } from "./abi/portal.js";
+import { EVMRouteAbiItem, portalAbi } from "./abi/portal.js";
 import { quoterV2Abi } from "./abi/quoterV2.js";
 import { uniswapV3RouterAbi } from "./abi/uniswapV3Router.js";
 import {
@@ -103,7 +105,9 @@ import {
   chunkRouteBytes,
   computeBucketsHash,
   computeIntentHash,
+  DISCRIMINATOR,
   encodeCalldataWithAccounts,
+  encodeReward,
   encodeRoute,
   eventAuthorityPda,
   executorPda,
@@ -160,7 +164,15 @@ const PORTAL_BASE: Address = "0x399Dbd5DF04f83103F77A58cBa2B7c4d3cdede97";
 // is a dust pool and severely misprices.
 const USDC_TOSHI_FEE: FeeAmount = v3Sdk.FeeAmount.HIGH; // 10000
 const BASE_CHAIN_ID = 8453n;
-const PROVER: Address = "0xC972B26C1E208845Ca8C18c6B83466bFCeED8c2F";
+
+// HyperProver deployments. Prover identity is committed into the SVM reward
+// (so the SVM Portal's `withdraw` validates the proof PDA at
+// `Proof::pda(intent_hash, reward.prover)`); `fulfillAndProve` on Base routes
+// the cross-chain message through the Base HyperProver.
+const SVM_HYPER_PROVER = new PublicKey(
+  "EcooFDTfKVVo5qZcpNoDngMmVXqrG6FQT1D5LDjZEGeR",
+);
+const BASE_HYPER_PROVER: Address = "0xC972B26C1E208845Ca8C18c6B83466bFCeED8c2F";
 
 // Uniswap SDK tokens
 const USDC_BASE_TOKEN = new sdkCore.Token(
@@ -175,13 +187,6 @@ const TOSHI_TOKEN = new sdkCore.Token(8453, TOSHI_BASE, 18, "TOSHI", "Toshi");
 // ─── EVM-destination types ──────────────────────────────────────────────────
 
 type EVMCall = { target: Address; data: Hex; value: bigint };
-type EVMReward = {
-  deadline: bigint;
-  creator: Address;
-  prover: Address;
-  nativeAmount: bigint;
-  tokens: { token: Address; amount: bigint }[];
-};
 type EVMRouteStruct = {
   salt: Hex;
   deadline: bigint;
@@ -193,8 +198,12 @@ type EVMRouteStruct = {
 type BucketEntry = {
   routeBytes: Hex; // abi.encode(EVMRouteStruct) — the Route bytes Portal hashes
   routeStruct: EVMRouteStruct;
-  evmReward: EVMReward; // for Base fulfill
-  svmReward: Reward; // for SVM close_and_select + post-publish
+  // The reward Base's `fulfill` commits to is the SVM-native Reward hashed
+  // via Borsh — same bytes as the SVM Portal commits to under the funded
+  // vault. Keeping reward_hash identical across chains is what makes
+  // intent_hash identical, which is what the cross-chain prove → withdraw
+  // path requires to find the Solana vault.
+  svmReward: Reward;
   bucket: Bucket;
   routeAmount: bigint; // USDC delivered on Base
   toshiQuote: bigint; // expected TOSHI at build time
@@ -360,17 +369,10 @@ async function buildBucketEntries(
       routeDeadline,
     );
 
-    const evmReward: EVMReward = {
-      deadline: rewardDeadline,
-      creator: user,
-      prover: PROVER,
-      nativeAmount: 0n,
-      tokens: [{ token: USDC_BASE, amount: rewardAmount }],
-    };
-
-    // Same reward, SVM-shape — used as `baseReward` on close_and_select_intent
+    // SVM-native Reward — used as `baseReward` on close_and_select_intent
     // (amount=0 placeholder; program clones and sets the selected bucket's
-    // rewardAmount) and re-hydrated into the EVM reward for post-publish.
+    // rewardAmount) AND as the reward bytes Base's `fulfill` commits to, so
+    // reward_hash is identical across chains.
     const svmReward: Reward = {
       deadline: rewardDeadline,
       creator: creatorSolana,
@@ -382,7 +384,6 @@ async function buildBucketEntries(
     entries.push({
       routeBytes,
       routeStruct,
-      evmReward,
       svmReward,
       bucket: {
         routeHash: hexToBytes(keccak256(routeBytes)),
@@ -596,42 +597,82 @@ async function createAndExtendBucketAlt(
 
 // ─── Destination fulfill (Base) ────────────────────────────────────────────
 
-function computeRewardHash(reward: EVMReward): Hex {
-  return keccak256(encodeAbiParameters([EVMRewardAbiItem], [reward]));
-}
+// Minimal HyperProver surface — just the fee-quote view used before
+// `fulfillAndProve`. Shape matches `MessageBridgeProver.fetchFee(domainID,
+// encodedProofs, data)` in the solver's `message-bridge-prover.abi.ts`.
+const hyperProverFetchFeeAbi = [
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "fetchFee",
+    inputs: [
+      { name: "domainID", type: "uint64" },
+      { name: "encodedProofs", type: "bytes" },
+      { name: "data", type: "bytes" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
 
-/**
- * Compute the EVM-side intent hash. Base Portal uses ABI-encoded Route/Reward
- * (each 32-byte padded, dynamic structs head-tail) and destination as uint256
- * (32 bytes BE). The SVM-side intent hash (from `computeIntentHash` in
- * common.ts) uses Borsh-encoded structs and destination as u64 BE (8 bytes),
- * so the two hashes naturally differ for the same logical intent. Base
- * Portal's `fulfill` recomputes and validates this formula.
- */
-function computeEvmIntentHash(
-  destination: bigint,
-  routeBytes: Hex,
-  rewardBytes: Hex,
-): Hex {
-  const routeHash = keccak256(routeBytes);
-  const rewardHash = keccak256(rewardBytes);
-  return keccak256(
-    encodeAbiParameters(
-      [{ type: "uint256" }, { type: "bytes32" }, { type: "bytes32" }],
-      [destination, routeHash, rewardHash],
-    ),
-  );
-}
+// Hyperlane domain ID for the cross-chain message back to Solana. HyperProver
+// uses chain-id-as-domain-id (see solver's `hyper.prover.ts:43-45`); Solana
+// mainnet chain ID is `CHAIN_ID_SOLANA` from `eco_svm_std` under the
+// `mainnet` feature.
+const SOLANA_HYPERLANE_DOMAIN = CHAIN_ID_SOLANA; // 1399811149n
 
-async function fulfillOnBase(
+async function fulfillAndProveOnBase(
   baseWallet: WalletClient,
   basePublic: PublicClient,
   intentHash: Hex,
   entry: BucketEntry,
-  claimant: Address,
+  claimant32: Hex, // bytes32 claimant Base stores + Hyperlane relays to Solana
+  toshiRecipient: Address, // EVM address that should end up holding TOSHI
 ): Promise<bigint> {
-  const rewardHash = computeRewardHash(entry.evmReward);
-  console.log(`Fulfilling on Base (routeAmount=${entry.routeAmount} USDC 6d)…`);
+  // Both chains' intent_hash is keccak256(u64_BE(chain_id) || route_hash ||
+  // reward_hash). To keep it identical across SVM ↔ EVM — which the
+  // cross-chain prove → withdraw path requires — we commit to the *same*
+  // reward_hash on Base that the SVM Portal committed to under the vault.
+  // Base's `fulfillAndProve` takes rewardHash as an opaque bytes32, so we
+  // just forward the SVM Borsh-based hash here.
+  const rewardHash = ("0x" +
+    Buffer.from(hashReward(entry.svmReward)).toString("hex")) as Hex;
+
+  // HyperProver proof payload: `abi.encode((bytes32 sourceChainProver,
+  // bytes metadata, address hook))`. Only `sourceChainProver` carries
+  // meaning in this flow — it tells the destination HyperProver which
+  // Solana program to route the cross-chain Hyperlane message to.
+  const svmProver32 = ("0x" +
+    Buffer.from(SVM_HYPER_PROVER.toBytes()).toString("hex")) as Hex;
+  const proofData = encodeAbiParameters(
+    [
+      {
+        type: "tuple",
+        components: [
+          { name: "sourceChainProver", type: "bytes32" },
+          { name: "metadata", type: "bytes" },
+          { name: "hook", type: "address" },
+        ],
+      },
+    ],
+    [{ sourceChainProver: svmProver32, metadata: "0x", hook: zeroAddress }],
+  );
+
+  // Quote the Hyperlane mailbox dispatch fee via the Base HyperProver. The
+  // `encodedProofs` layout matches solver's `evm.reader.service.ts` —
+  // packed(u64 domainID, bytes32 intentHash, bytes32 claimant).
+  const encodedProofs = encodePacked(
+    ["uint64", "bytes32", "bytes32"],
+    [SOLANA_HYPERLANE_DOMAIN, intentHash, claimant32],
+  );
+  const proverFee = (await basePublic.readContract({
+    address: BASE_HYPER_PROVER,
+    abi: hyperProverFetchFeeAbi,
+    functionName: "fetchFee",
+    args: [SOLANA_HYPERLANE_DOMAIN, encodedProofs, proofData],
+  })) as bigint;
+  console.log(
+    `Fulfilling on Base (routeAmount=${entry.routeAmount} USDC 6d; proverFee=${proverFee} wei)…`,
+  );
 
   const approveHash = await baseWallet.writeContract({
     address: USDC_BASE,
@@ -643,31 +684,47 @@ async function fulfillOnBase(
   });
   await basePublic.waitForTransactionReceipt({ hash: approveHash });
 
+  // Some RPCs (Alchemy/QuickNode) keep the approve tx in their internal
+  // pending pool for a beat after mining. Without an explicit nonce viem
+  // asks for the pending count and can reuse the approve's slot, tripping
+  // "replacement transaction underpriced" on the next send. Wait a moment,
+  // then lock the nonce to the post-approve `latest`.
+  await sleep(2_000);
+  const fulfillNonce = await basePublic.getTransactionCount({
+    address: baseWallet.account!.address,
+    blockTag: "latest",
+  });
+
   // Alchemy's eth_estimateGas chokes on fulfill's nested-bytes[] return with
   // a spurious "-32602 Invalid params" on some providers; pass gas directly
-  // to bypass estimation. 600k covers real cost (~287k on recent txs) with
-  // headroom.
+  // to bypass estimation. 800k covers fulfill's ~287k plus the Hyperlane
+  // dispatch overhead with headroom.
   const fulfillHash = await baseWallet.writeContract({
     address: PORTAL_BASE,
     abi: portalAbi,
-    functionName: "fulfill",
+    functionName: "fulfillAndProve",
     args: [
       intentHash,
       entry.routeStruct,
       rewardHash,
-      pad(claimant, { size: 32 }),
+      claimant32,
+      BASE_HYPER_PROVER,
+      SOLANA_HYPERLANE_DOMAIN,
+      proofData,
     ],
     account: baseWallet.account!,
     chain: baseWallet.chain!,
-    gas: 600_000n,
+    value: proverFee,
+    gas: 800_000n,
+    nonce: fulfillNonce,
   });
-  console.log(`  fulfill tx: ${fulfillHash}`);
+  console.log(`  fulfillAndProve tx: ${fulfillHash}`);
 
   const receipt = await basePublic.waitForTransactionReceipt({
     hash: fulfillHash,
   });
   if (receipt.status !== "success") {
-    throw new Error(`fulfill reverted (tx ${fulfillHash})`);
+    throw new Error(`fulfillAndProve reverted (tx ${fulfillHash})`);
   }
 
   // Parse TOSHI Transfer events in *this* receipt — don't trust
@@ -681,12 +738,189 @@ async function fulfillOnBase(
   for (const log of transfers) {
     if (
       log.address.toLowerCase() === TOSHI_BASE.toLowerCase() &&
-      log.args.to?.toLowerCase() === claimant.toLowerCase()
+      log.args.to?.toLowerCase() === toshiRecipient.toLowerCase()
     ) {
       delivered += log.args.value ?? 0n;
     }
   }
   return delivered;
+}
+
+// ─── Source-chain withdraw (Solana) ────────────────────────────────────────
+
+// HyperProver `pda_payer_pda` — receives the lamports freed by `close_proof`.
+const HYPER_PROVER_PDA_PAYER_SEED = Buffer.from("pda_payer");
+
+function hyperProverPdaPayerPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [HYPER_PROVER_PDA_PAYER_SEED],
+    SVM_HYPER_PROVER,
+  );
+}
+
+/**
+ * Proof PDA under an explicit prover program. The helper in `common.ts`
+ * hardcodes `LOCAL_PROVER_PROGRAM_ID` (used by the flash-fulfill flow); for
+ * the cross-chain reward proof we need it under the HyperProver.
+ */
+function hyperProverProofPda(intentHash: Uint8Array): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("proof"), Buffer.from(intentHash)],
+    SVM_HYPER_PROVER,
+  );
+}
+
+/**
+ * Portal's `withdraw` instruction. Accounts mirror `Withdraw` in
+ * `eco-routes-svm/programs/portal/src/instructions/withdraw.rs`; remaining
+ * accounts are `[from, to, mint]` per reward token (chunk size = 3) followed
+ * by prover-specific `close_proof` extras (HyperProver needs `pda_payer`).
+ */
+function buildWithdrawInstruction(params: {
+  payer: PublicKey;
+  claimant: PublicKey;
+  vaultPda: PublicKey;
+  proofPda: PublicKey;
+  proofCloserPda: PublicKey;
+  proverProgram: PublicKey;
+  withdrawnMarkerPda: PublicKey;
+  destination: bigint;
+  routeHash: Uint8Array;
+  reward: Reward;
+  transfers: Array<{ from: PublicKey; to: PublicKey; mint: PublicKey }>;
+  closeProofExtras: PublicKey[];
+}): TransactionInstruction {
+  const argsBytes = Buffer.concat([
+    ((): Buffer => {
+      const b = Buffer.alloc(8);
+      b.writeBigUInt64LE(params.destination, 0);
+      return b;
+    })(),
+    Buffer.from(params.routeHash),
+    Buffer.from(encodeReward(params.reward)),
+  ]);
+  const data = Buffer.concat([Buffer.from(DISCRIMINATOR.withdraw), argsBytes]);
+
+  const keys = [
+    { pubkey: params.payer, isSigner: true, isWritable: true },
+    { pubkey: params.claimant, isSigner: false, isWritable: true },
+    { pubkey: params.vaultPda, isSigner: false, isWritable: true },
+    { pubkey: params.proofPda, isSigner: false, isWritable: true },
+    { pubkey: params.proofCloserPda, isSigner: false, isWritable: false },
+    { pubkey: params.proverProgram, isSigner: false, isWritable: false },
+    { pubkey: params.withdrawnMarkerPda, isSigner: false, isWritable: true },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: TOKEN_2022_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+  for (const t of params.transfers) {
+    keys.push({ pubkey: t.from, isSigner: false, isWritable: true });
+    keys.push({ pubkey: t.to, isSigner: false, isWritable: true });
+    keys.push({ pubkey: t.mint, isSigner: false, isWritable: false });
+  }
+  for (const extra of params.closeProofExtras) {
+    keys.push({ pubkey: extra, isSigner: false, isWritable: true });
+  }
+
+  return new TransactionInstruction({
+    programId: PORTAL_PROGRAM_ID,
+    keys,
+    data,
+  });
+}
+
+async function withdrawOnSolana(params: {
+  connection: Connection;
+  userKey: Keypair;
+  userRewardAta: PublicKey;
+  intentHash: Uint8Array;
+  routeHash: Uint8Array;
+  rewardAmount: bigint;
+  winningReward: Reward;
+}): Promise<void> {
+  const {
+    connection,
+    userKey,
+    userRewardAta,
+    intentHash,
+    routeHash,
+    rewardAmount,
+    winningReward,
+  } = params;
+  const user = userKey.publicKey;
+
+  const [vaultPdaPk] = vaultPda(intentHash);
+  const vaultUsdcAta = vaultAta(vaultPdaPk, USDC_SOLANA, TOKEN_PROGRAM_ID);
+  const [proofPdaPk] = hyperProverProofPda(intentHash);
+  const [proofCloserPk] = proofCloserPda();
+  const [withdrawnMarkerPk] = withdrawnMarkerPda(intentHash);
+  const [pdaPayerPk] = hyperProverPdaPayerPda();
+
+  // Poll for the Hyperlane relay to land the proof account. ~60s is
+  // already baked in upstream; give it up to another ~2min before bailing.
+  let proofFound = false;
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const info = await connection.getAccountInfo(proofPdaPk, "confirmed");
+    if (info) {
+      proofFound = true;
+      break;
+    }
+    if (attempt === 0) {
+      console.log(
+        `Proof PDA ${proofPdaPk.toBase58()} not yet present; polling every 5s…`,
+      );
+    }
+    await sleep(5_000);
+  }
+  if (!proofFound) {
+    throw new Error(
+      `Proof PDA ${proofPdaPk.toBase58()} never landed — Hyperlane relay timed out. ` +
+        `The vault is still funded; re-run withdraw once the proof account exists.`,
+    );
+  }
+
+  const beforeBal = BigInt(
+    (await connection.getTokenAccountBalance(userRewardAta, "confirmed")).value
+      .amount,
+  );
+
+  const withdrawIx = buildWithdrawInstruction({
+    payer: user,
+    claimant: user,
+    vaultPda: vaultPdaPk,
+    proofPda: proofPdaPk,
+    proofCloserPda: proofCloserPk,
+    proverProgram: SVM_HYPER_PROVER,
+    withdrawnMarkerPda: withdrawnMarkerPk,
+    destination: BASE_CHAIN_ID,
+    routeHash,
+    reward: winningReward,
+    transfers: [{ from: vaultUsdcAta, to: userRewardAta, mint: USDC_SOLANA }],
+    closeProofExtras: [pdaPayerPk],
+  });
+
+  const { blockhash } = await connection.getLatestBlockhash();
+  const msg = new TransactionMessage({
+    payerKey: user,
+    recentBlockhash: blockhash,
+    instructions: [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+      withdrawIx,
+    ],
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(msg);
+  tx.sign([userKey]);
+  console.log("Sending withdraw tx on Solana…");
+  const sig = await sendAndConfirmRobust(connection, tx);
+  console.log(`  withdraw tx: ${sig}`);
+
+  const afterBal = BigInt(
+    (await connection.getTokenAccountBalance(userRewardAta, "confirmed")).value
+      .amount,
+  );
+  console.log(
+    `  USDC claimed: ${afterBal - beforeBal} (expected ${rewardAmount})`,
+  );
 }
 
 // ─── Main orchestration ─────────────────────────────────────────────────────
@@ -833,8 +1067,8 @@ async function main() {
     evmAccount.address,
     jupiterOutAmount,
     jupiterMinOut,
-    user,
-    user, // prover on SVM side; PROVER const is for EVM reward
+    user, // creator on SVM side
+    SVM_HYPER_PROVER, // prover: Solana HyperProver — must match baseRewardForCall below
     rewardDeadline,
     routeDeadline,
   );
@@ -901,10 +1135,15 @@ async function main() {
   // old user sandwich: open snapshots executor's USDC ATA at 0, Jupiter
   // swaps PENGU → USDC into that same ATA, close_and_select_intent measures
   // the delta and funds the downstream (Base) intent vault.
+  // Must mirror the per-bucket `svmReward` built in `buildBucketEntries` —
+  // the Solana Portal's `withdraw` recomputes `types::intent_hash(dst,
+  // route_hash, reward.hash())` and derives the proof PDA at
+  // `Proof::pda(intent_hash, reward.prover)`, so the prover here has to be
+  // the same HyperProver program the Base side routes its proof through.
   const baseRewardForCall: Reward = {
     deadline: rewardDeadline,
     creator: user,
-    prover: user,
+    prover: SVM_HYPER_PROVER,
     nativeAmount: 0n,
     tokens: [{ token: USDC_SOLANA, amount: 0n }],
   };
@@ -1248,6 +1487,11 @@ async function main() {
       // alone OOMs, and the heap bump alone OOMed pre-fix.
       instructions: [
         ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        // Without a priority fee the ~574B flash_fulfill tx gets dropped on
+        // busy slots — the validator prioritizes tip-paying txs. 200k
+        // microlamports/CU × 1.4M CU ≈ 0.00028 SOL ceiling, cheap insurance
+        // against mainnet congestion.
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200_000 }),
         ComputeBudgetProgram.requestHeapFrame({ bytes: 256 * 1024 }),
         flashFulfillIx,
       ],
@@ -1356,33 +1600,29 @@ async function main() {
   }
   console.log();
 
-  // 8. Act as solver on Base: fulfill the funded intent.
-  //    Use Portal's `getIntentHash(Intent)` overload — passes the full
-  //    Intent struct so Portal computes routeHash, rewardHash, and
-  //    intentHash with its own exact encoding. Eliminates any chance our
-  //    locally-computed routeHash differs from what fulfill recomputes.
-  const intentStruct = {
-    destination: BASE_CHAIN_ID,
-    route: selectedEntry.routeStruct,
-    reward: selectedEntry.evmReward,
-  };
-  const [evmIntentHash, evmRouteHash, evmRewardHash] =
-    (await basePublic.readContract({
-      address: PORTAL_BASE,
-      abi: portalAbi,
-      functionName: "getIntentHash",
-      args: [intentStruct],
-    })) as readonly [Hex, Hex, Hex];
-  console.log(`SVM intent_hash: 0x${hexOf(selection.intentHash)}`);
-  console.log(`EVM intent_hash: ${evmIntentHash}`);
-  console.log(`EVM route_hash:  ${evmRouteHash}`);
-  console.log(`EVM reward_hash: ${evmRewardHash}`);
+  // 8. Act as solver on Base: `fulfillAndProve` the funded intent. The
+  //    intent_hash Base commits to is the one already emitted in
+  //    `IntentSelected` on Solana — identical formula, shared route_hash,
+  //    and (via `fulfillAndProveOnBase`) shared Borsh-based reward_hash.
+  //    Base's Inbox recomputes keccak(u64(CHAIN_ID) || routeHash ||
+  //    rewardHash) and reverts if it doesn't match. The appended `prove`
+  //    step dispatches a Hyperlane message to the Solana HyperProver so
+  //    the solver can later `withdraw` the reward from the SVM vault.
+  const intentHash = ("0x" + hexOf(selection.intentHash)) as Hex;
+  // Claim on the source chain: use the SVM user's pubkey as the 32-byte
+  // claimant so the Hyperlane-delivered `proof.claimant` resolves to an
+  // on-curve Solana pubkey with an existing USDC ATA.
+  const claimant32 = ("0x" +
+    Buffer.from(user.toBytes()).toString("hex")) as Hex;
+  console.log(`intent_hash: ${intentHash}`);
+  console.log(`claimant:    ${user.toBase58()} (as bytes32 on Base)`);
   console.log();
-  const toshiDelivered = await fulfillOnBase(
+  const toshiDelivered = await fulfillAndProveOnBase(
     baseWallet,
     basePublic,
-    evmIntentHash,
+    intentHash,
     selectedEntry,
+    claimant32,
     evmAccount.address,
   );
   console.log(`  TOSHI delivered: ${toshiDelivered}`);
@@ -1394,6 +1634,24 @@ async function main() {
     actualOut: toshiDelivered,
     decimals: TOSHI_TOKEN.decimals,
     symbol: TOSHI_TOKEN.symbol!,
+  });
+
+  // 9. Wait a minute for Hyperlane to relay the cross-chain proof from Base
+  //    back to the Solana HyperProver, then withdraw the USDC reward from
+  //    the SVM vault into the user's USDC ATA. `withdraw` validates the
+  //    proof PDA (written by the HyperProver's `handle` on message receipt)
+  //    against `(intent_hash, reward.prover)`, so if the relay hasn't
+  //    landed yet we poll briefly before giving up.
+  console.log("Waiting 60s for Hyperlane relay (Base → Solana)…");
+  await sleep(60_000);
+  await withdrawOnSolana({
+    connection,
+    userKey: config.userKey,
+    userRewardAta,
+    intentHash: selection.intentHash,
+    routeHash: selectedEntry.bucket.routeHash,
+    rewardAmount: selection.rewardAmount,
+    winningReward,
   });
 }
 
@@ -1485,7 +1743,7 @@ function randomSalt(): Uint8Array {
 async function sendAndConfirmRobust(
   connection: Connection,
   tx: VersionedTransaction,
-  timeoutMs = 90_000,
+  timeoutMs = 120_000,
 ): Promise<string> {
   // sendTransaction can transiently fail with "Blockhash not found" while
   // the freshly-fetched blockhash propagates across the RPC's forwarder
@@ -1507,7 +1765,15 @@ async function sendAndConfirmRobust(
     }
   }
   if (!sig) throw lastErr;
+  // RPC forwarders sometimes drop a tx after the initial submit without
+  // surfacing it to leaders. Re-submit the raw bytes every `RESEND_MS`
+  // until the cluster confirms it or the blockhash ages out. The same
+  // signature is deterministic from the raw bytes, so duplicates are
+  // silently deduplicated cluster-side.
+  const rawTx = tx.serialize();
+  const RESEND_MS = 5_000;
   const start = Date.now();
+  let lastResend = start;
   while (Date.now() - start < timeoutMs) {
     const s = await connection.getSignatureStatus(sig, {
       searchTransactionHistory: true,
@@ -1517,6 +1783,18 @@ async function sendAndConfirmRobust(
     }
     const c = s.value?.confirmationStatus;
     if (c === "confirmed" || c === "finalized") return sig;
+    if (Date.now() - lastResend >= RESEND_MS) {
+      try {
+        await connection.sendRawTransaction(rawTx, {
+          skipPreflight: true,
+          maxRetries: 0,
+        });
+      } catch {
+        // Re-submit errors are expected (AlreadyProcessed after confirm,
+        // forwarder rate limits) — keep polling.
+      }
+      lastResend = Date.now();
+    }
     await sleep(1500);
   }
   throw new Error(`tx ${sig} not confirmed within ${timeoutMs / 1000}s`);
