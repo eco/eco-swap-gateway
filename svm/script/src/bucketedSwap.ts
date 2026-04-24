@@ -80,7 +80,10 @@ import {
 import { withdrawFromSource } from "./bucketed-swap/source/withdraw.js";
 import { fulfillOnBase } from "./bucketed-swap/destination/fulfill.js";
 import { executorPda } from "./common.js";
-import { createLookupTable } from "./bucketed-swap/util/lookup-table.js";
+import {
+  createLookupTable,
+  deactivateLookupTables,
+} from "./bucketed-swap/util/lookup-table.js";
 import { hexOf } from "./bucketed-swap/util/hex.js";
 import { sleep } from "./bucketed-swap/util/tx.js";
 import type { Reward } from "./common.js";
@@ -169,7 +172,7 @@ async function main(): Promise<void> {
   });
   console.log(`  tx: ${setupSig}\n`);
 
-  const flashSig = await flashFulfill({
+  const { signature: flashSig, flashFulfillAlt } = await flashFulfill({
     connection: ctx.connection,
     userKey: ctx.userKey,
     intent: localIntent,
@@ -264,6 +267,43 @@ async function main(): Promise<void> {
     rewardAmount: selection.rewardAmount,
     winningReward,
   });
+
+  // ── ALT cleanup (phase 1 of 2) ─────────────────────────────────────────
+  // Each run creates two single-use ALTs (bucketAlt and flashFulfillAlt).
+  // Their contents are tied to this quote (per-bucket vault PDAs, per-run
+  // flash-fulfill PDAs) and cannot be reused on a future run, so we mark
+  // them for reaping as soon as we're done. Rent per run is ~0.008 SOL
+  // (~$1.50 at $180/SOL); un-reaped ALTs are a slow-motion SOL leak on a
+  // high-throughput solver.
+  //
+  // `deactivateLookupTable` is immediate and starts a ~513-slot cooldown
+  // (~3–4 minutes on mainnet) before `closeLookupTable` is callable. We
+  // intentionally do NOT block here waiting for cooldown — that would
+  // stall the serving pipeline with idle time. Phase 2 (close + rent
+  // refund) MUST be handled by a CRON JOB / separate sweeper that:
+  //
+  //   1. `getProgramAccounts` on the AddressLookupTable program, filtered
+  //      by `authority == service_wallet`.
+  //   2. For each returned ALT, decode and check `state.deactivationSlot`:
+  //      - `u64::MAX` → still active, skip.
+  //      - `< current_slot - 513` → cooldown elapsed, closable.
+  //      - otherwise → deactivated but still cooling; skip this run.
+  //   3. Send `closeLookupTable` for each closable ALT with
+  //      `recipient = service_wallet` to refund the rent.
+  //
+  // Suggested cadence: every 5 minutes. Each close call is ~1 tx per ALT
+  // (can be batched — same packet-size headroom math as below), so even
+  // a backlog of hundreds of ALTs clears in a handful of txs.
+  console.log("Deactivating per-quote ALTs (phase 1 of 2)…");
+  const deactivateSig = await deactivateLookupTables(
+    ctx.connection,
+    ctx.userKey,
+    [bucketAlt, flashFulfillAlt],
+  );
+  console.log(`  tx: ${deactivateSig}`);
+  console.log(
+    `  NOTE: close + rent refund requires a cron job (see comment above).`,
+  );
 }
 
 function buildContext(): Context {

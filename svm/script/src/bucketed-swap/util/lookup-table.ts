@@ -76,11 +76,62 @@ export async function createLookupTable(
   throw new Error(`ALT ${altAddress.toBase58()} did not activate within 15s`);
 }
 
+/**
+ * Mark one or more ALTs for deletion. This is PHASE 1 of Solana's two-phase
+ * ALT close:
+ *
+ *   1. `deactivateLookupTable` — immediate, idempotent-ish (repeat calls no-op
+ *      after the table is already deactivated). Sets the "deactivation slot"
+ *      on the ALT account. After this, the ALT can no longer be used as a
+ *      loaded-addresses source in v0 transactions.
+ *
+ *   2. `closeLookupTable` — only succeeds once the current slot is >=
+ *      `deactivation_slot + 513` (~3–4 minutes on mainnet). Refunds the
+ *      account's rent-exempt reserve to the chosen recipient.
+ *
+ * We do ONLY phase 1 here — the run cannot block for 3–4 min without
+ * disrupting throughput on a production server. Phase 2 MUST be handled by
+ * an out-of-band cron job (see `closeAbandonedLookupTables` below / the
+ * separate sweeper script) that:
+ *
+ *   - Enumerates ALTs owned by the service wallet (`getProgramAccounts` on
+ *     the AddressLookupTable program, filtered by authority).
+ *   - Filters to ALTs whose `state.deactivationSlot != u64::MAX` AND whose
+ *     cooldown has elapsed (current slot ≥ deactivationSlot + 513).
+ *   - Sends `closeLookupTable` for each, recipient = service wallet.
+ *
+ * Why it matters: every demo run creates two fresh ALTs (bucket ALT with 2N
+ * entries, flash-fulfill ALT with ~25 entries). Rent per run is ~0.008 SOL
+ * (~$1.50 at $180/SOL). Across high-volume production traffic this is a
+ * non-trivial drain on the solver's SOL budget; leaving ALTs un-reaped is
+ * effectively a slow-motion leak.
+ *
+ * Bundling both deactivations into a single tx (instead of one-per-ALT)
+ * saves a signature + blockhash round-trip. Instruction size is tiny
+ * (~36B per deactivate ix) so there's no packet-limit concern.
+ */
+export async function deactivateLookupTables(
+  connection: Connection,
+  authority: Keypair,
+  alts: AddressLookupTableAccount[],
+): Promise<string> {
+  if (alts.length === 0) {
+    throw new Error("deactivateLookupTables called with empty ALT list");
+  }
+  const instructions = alts.map((alt) =>
+    AddressLookupTableProgram.deactivateLookupTable({
+      lookupTable: alt.key,
+      authority: authority.publicKey,
+    }),
+  );
+  return await sendTx(connection, authority, instructions);
+}
+
 async function sendTx(
   connection: Connection,
   payer: Keypair,
   instructions: TransactionInstruction[],
-): Promise<void> {
+): Promise<string> {
   const { blockhash } = await connection.getLatestBlockhash();
   const msg = new TransactionMessage({
     payerKey: payer.publicKey,
@@ -89,5 +140,5 @@ async function sendTx(
   }).compileToV0Message();
   const tx = new VersionedTransaction(msg);
   tx.sign([payer]);
-  await sendAndConfirm(connection, tx);
+  return await sendAndConfirm(connection, tx);
 }

@@ -40,7 +40,11 @@ const FLASH_FULFILLER_HEAP_BYTES = 256 * 1024;
 
 /**
  * End-to-end flash_fulfill sequence: init → chunk upload → flash_fulfill.
- * Returns the flash_fulfill tx signature.
+ *
+ * Returns both the flash_fulfill tx signature AND the per-quote ALT the
+ * sequence created. The caller owns the ALT's lifecycle from here — at
+ * minimum it should be passed to `deactivateLookupTables` once the demo
+ * is complete so a cron job can reap its rent after the 513-slot cooldown.
  */
 export async function flashFulfill(params: {
   connection: Connection;
@@ -54,11 +58,15 @@ export async function flashFulfill(params: {
   jupiterSwapIx: TransactionInstruction;
   jupiterAlts: AddressLookupTableAccount[];
   bucketAlt: AddressLookupTableAccount;
-}): Promise<string> {
+}): Promise<{
+  signature: string;
+  flashFulfillAlt: AddressLookupTableAccount;
+}> {
   await sendInit(params);
   await uploadChunks(params);
   const flashFulfillAlt = await createFlashFulfillAlt(params);
-  return await sendFlashFulfill({ ...params, flashFulfillAlt });
+  const signature = await sendFlashFulfill({ ...params, flashFulfillAlt });
+  return { signature, flashFulfillAlt };
 }
 
 async function sendInit(params: {
