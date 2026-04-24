@@ -39,12 +39,14 @@ import {
   Keypair,
   MessageV0,
   PublicKey,
+  SystemProgram,
   TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
   type AddressLookupTableAccount,
 } from "@solana/web3.js";
 import {
+  createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
@@ -83,15 +85,39 @@ import { quoterV2Abi } from "./abi/quoterV2.js";
 import { uniswapV3RouterAbi } from "./abi/uniswapV3Router.js";
 import {
   Bucket,
+  Call,
+  CHAIN_ID_SOLANA,
+  ECO_SWAP_GATEWAY_PROGRAM_ID,
+  FLASH_FULFILLER_PROGRAM_ID,
+  LOCAL_PROVER_PROGRAM_ID,
+  PORTAL_PROGRAM_ID,
   Reward,
+  Route,
+  buildAppendFlashFulfillRouteChunkInstruction,
   buildCloseAndSelectInstruction,
+  buildFlashFulfillInstruction,
+  buildInitFlashFulfillIntentInstruction,
   buildOpenInstruction,
+  buildPortalFundInstruction,
   buildPublishInstruction,
+  chunkRouteBytes,
   computeBucketsHash,
   computeIntentHash,
+  encodeCalldataWithAccounts,
+  encodeRoute,
+  eventAuthorityPda,
+  executorPda,
+  flashFulfillIntentPda,
+  flashVaultPda,
+  fulfillMarkerPda,
   hashReward,
+  hashRoute,
+  proofCloserPda,
+  proofPda,
+  snapshotPda,
   vaultAta,
   vaultPda,
+  withdrawnMarkerPda,
 } from "./common.js";
 
 // ─── Configuration ─────────────────────────────────────────────────────────
@@ -489,10 +515,15 @@ async function resolveJupiterAlts(
 
 // ─── Per-quote ALT for the 2N bucket accounts ──────────────────────────────
 
+/// Extend a single tx's worth of addresses. The v0 tx packet caps at 1232B;
+/// each address is 32B; after ix/account/tx framing ~20 addresses per
+/// extend is a safe budget and leaves headroom for the create ix in tx 1.
+const ALT_EXTEND_CHUNK = 20;
+
 async function createAndExtendBucketAlt(
   connection: Connection,
   payer: Keypair,
-  bucketAccounts: PublicKey[],
+  accounts: PublicKey[],
 ): Promise<AddressLookupTableAccount> {
   const slot = await connection.getSlot({ commitment: "finalized" });
   const [createIx, altAddress] = AddressLookupTableProgram.createLookupTable({
@@ -501,39 +532,63 @@ async function createAndExtendBucketAlt(
     recentSlot: slot,
   });
 
-  // Extend can include up to ~30 addresses per call (256-byte account-list
-  // chunk cap). 2N <= 28 at N=14 fits in a single extend.
-  const extendIx = AddressLookupTableProgram.extendLookupTable({
-    lookupTable: altAddress,
-    authority: payer.publicKey,
-    payer: payer.publicKey,
-    addresses: bucketAccounts,
-  });
+  const first = accounts.slice(0, ALT_EXTEND_CHUNK);
+  const rest: PublicKey[][] = [];
+  for (let i = ALT_EXTEND_CHUNK; i < accounts.length; i += ALT_EXTEND_CHUNK) {
+    rest.push(accounts.slice(i, i + ALT_EXTEND_CHUNK));
+  }
 
-  const { blockhash } = await connection.getLatestBlockhash();
-  const msg = new TransactionMessage({
-    payerKey: payer.publicKey,
-    recentBlockhash: blockhash,
-    instructions: [createIx, extendIx],
-  }).compileToV0Message();
-  const tx = new VersionedTransaction(msg);
-  tx.sign([payer]);
-  const sig = await connection.sendTransaction(tx);
-  await connection.confirmTransaction({
-    signature: sig,
-    blockhash,
-    lastValidBlockHeight: (await connection.getLatestBlockhash())
-      .lastValidBlockHeight,
-  });
+  // Tx 1: create + first extend chunk.
+  {
+    const ixs: TransactionInstruction[] = [createIx];
+    if (first.length > 0) {
+      ixs.push(
+        AddressLookupTableProgram.extendLookupTable({
+          lookupTable: altAddress,
+          authority: payer.publicKey,
+          payer: payer.publicKey,
+          addresses: first,
+        }),
+      );
+    }
+    const { blockhash } = await connection.getLatestBlockhash();
+    const msg = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: ixs,
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([payer]);
+    await sendAndConfirmRobust(connection, tx);
+  }
+
+  // Subsequent txs: extend per chunk.
+  for (const chunk of rest) {
+    const ix = AddressLookupTableProgram.extendLookupTable({
+      lookupTable: altAddress,
+      authority: payer.publicKey,
+      payer: payer.publicKey,
+      addresses: chunk,
+    });
+    const { blockhash } = await connection.getLatestBlockhash();
+    const msg = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [ix],
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([payer]);
+    await sendAndConfirmRobust(connection, tx);
+  }
 
   // ALTs need at least one slot after creation before they can be used in
   // another tx. Wait until `getAddressLookupTable` resolves to a populated
-  // account instead of sleep-polling.
+  // account with all expected entries present.
   for (let i = 0; i < 30; i++) {
     const acct = await connection
       .getAddressLookupTable(altAddress)
       .then((r) => r.value);
-    if (acct && acct.state.addresses.length > 0) return acct;
+    if (acct && acct.state.addresses.length >= accounts.length) return acct;
     await sleep(500);
   }
   throw new Error(`ALT ${altAddress.toBase58()} did not activate within 15s`);
@@ -723,6 +778,22 @@ async function main() {
   const user = config.userKey.publicKey;
   const userRewardAta = getAssociatedTokenAddressSync(USDC_SOLANA, user);
   const sweepRecipientAta = userRewardAta; // surplus → user by default
+  const userPenguAta = getAssociatedTokenAddressSync(PENGU_MINT, user);
+
+  // Executor PDA (portal-owned; signs Route calls via invoke_signed). Its
+  // USDC ATA is where Jupiter deposits inside the flash_fulfill Route, and
+  // its PENGU ATA is where fulfill pre-funds route.tokens.
+  const [executorPdaPk] = executorPda();
+  const executorUsdcAta = getAssociatedTokenAddressSync(
+    USDC_SOLANA,
+    executorPdaPk,
+    true,
+  );
+  const executorPenguAta = getAssociatedTokenAddressSync(
+    PENGU_MINT,
+    executorPdaPk,
+    true,
+  );
 
   const inputAmount = BigInt(
     Math.round(Number(PENGU_INPUT_HUMAN) * 10 ** PENGU_DECIMALS),
@@ -798,31 +869,54 @@ async function main() {
   );
   console.log();
 
-  // 4. Jupiter swap instructions (post-ALT so the routing can include our
-  //    bucket ALT in the final ALT list).
+  // 4. Jupiter swap instructions. Authority = executor PDA (portal signs via
+  //    invoke_signed during fulfill); destination = executor's USDC ATA so
+  //    the Route's open/close_and_select snapshot the same account.
   console.log("Fetching Jupiter swap instructions…");
-  const swapIx = await fetchJupiterSwapInstructions(quote, user, userRewardAta);
+  const swapIx = await fetchJupiterSwapInstructions(
+    quote,
+    executorPdaPk,
+    executorUsdcAta,
+  );
   const jupiterAlts = await resolveJupiterAlts(
     connection,
     swapIx.addressLookupTableAddresses,
   );
-  console.log(
-    `  ixs: ${(swapIx.setupInstructions?.length ?? 0) + 1 + (swapIx.cleanupInstruction ? 1 : 0)}`,
-  );
+  if (swapIx.setupInstructions?.length || swapIx.cleanupInstruction) {
+    throw new Error(
+      "Jupiter returned setup/cleanup ixs; this flow only supports a single swap ix in the Route",
+    );
+  }
+  const jupiterSwapWeb3 = jupiterIxToWeb3(swapIx.swapInstruction);
+  console.log(`  ix accounts: ${jupiterSwapWeb3.keys.length}`);
   console.log(`  ALTs: ${jupiterAlts.length}`);
   console.log();
 
-  // 5. Build user tx [ComputeBudget, open, <Jupiter>, close_and_select].
+  // 5. Build the LOCAL intent's Route.
+  //
+  // The LOCAL intent is same-chain (destination = CHAIN_ID_SOLANA). Its
+  // reward is the user's PENGU input, which gets withdrawn to flash_vault
+  // and then pre-funded into the executor as route.tokens. The Route's
+  // calls run inside portal.fulfill's executor context and replicate the
+  // old user sandwich: open snapshots executor's USDC ATA at 0, Jupiter
+  // swaps PENGU → USDC into that same ATA, close_and_select_intent measures
+  // the delta and funds the downstream (Base) intent vault.
   const baseRewardForCall: Reward = {
     deadline: rewardDeadline,
     creator: user,
-    prover: user, // SVM prover; distinct from EVM reward's prover.
+    prover: user,
     nativeAmount: 0n,
-    tokens: [{ token: USDC_SOLANA, amount: 0n }], // placeholder; program clones per bucket
+    tokens: [{ token: USDC_SOLANA, amount: 0n }],
   };
 
-  const closeIx = buildCloseAndSelectInstruction(
-    { user, userRewardAta, sweepRecipientAta, mint: USDC_SOLANA },
+  const openCallIx = buildOpenInstruction(executorPdaPk, executorUsdcAta);
+  const closeCallIx = buildCloseAndSelectInstruction(
+    {
+      user: executorPdaPk,
+      userRewardAta: executorUsdcAta,
+      sweepRecipientAta,
+      mint: USDC_SOLANA,
+    },
     {
       destination: BASE_CHAIN_ID,
       baseReward: baseRewardForCall,
@@ -831,50 +925,357 @@ async function main() {
     vaultPairs,
   );
 
-  const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
-    units: 400_000,
-  });
-  const userIxs: TransactionInstruction[] = [
-    computeBudgetIx,
-    buildOpenInstruction(user, userRewardAta),
-    ...(swapIx.setupInstructions?.map(jupiterIxToWeb3) ?? []),
-    jupiterIxToWeb3(swapIx.swapInstruction),
-    ...(swapIx.cleanupInstruction
-      ? [jupiterIxToWeb3(swapIx.cleanupInstruction)]
-      : []),
-    closeIx,
-  ];
+  const salt = Uint8Array.from(randomFillSync(Buffer.alloc(32)));
+  const localPenguReward: Reward = {
+    deadline: rewardDeadline,
+    creator: user,
+    // portal.withdraw validates `reward.prover == prover_account.key()`,
+    // and flash_fulfill CPIs into the local-prover program — so the reward
+    // must commit to the local-prover's program ID, not the user.
+    prover: LOCAL_PROVER_PROGRAM_ID,
+    nativeAmount: 0n,
+    tokens: [{ token: PENGU_MINT, amount: inputAmount }],
+  };
+  // Precompute MAX `isWritable` for every pubkey that appears in ANY of the
+  // three Route-call ixs. Solana's tx compiler dedups each pubkey with the
+  // most-permissive flags, and portal reconstructs CalldataWithAccounts from
+  // the resulting AccountInfo at CPI time — so committed CalldataWithAccounts
+  // must match the post-dedup view or the route hash diverges from portal's
+  // reconstruction and fulfill reverts with InvalidIntentHash.
+  //
+  // We only dedup across call-ix keys. Writability conflicts driven by the
+  // flash_fulfill fixed accounts (executor, etc.) resolve the same way since
+  // those accounts are already writable there, so their call-ix appearance
+  // gets its flag bumped the same. The only pubkeys whose writability
+  // actually flips across call ixs are executor PDA and executor USDC ATA
+  // (open marks them w=false, jupiter/close mark them w=true).
+  const writableSet: Set<string> = new Set();
+  for (const ix of [openCallIx, jupiterSwapWeb3, closeCallIx]) {
+    for (const k of ix.keys) {
+      if (k.isWritable) writableSet.add(k.pubkey.toBase58());
+    }
+  }
+  // executor PDA is writable at the outer flash_fulfill fixed-accounts slot;
+  // that dedups with jupiter's readonly appearance and flips it writable.
+  writableSet.add(executorPdaPk.toBase58());
 
-  const { blockhash, lastValidBlockHeight } =
-    await connection.getLatestBlockhash();
-  const message = new TransactionMessage({
-    payerKey: user,
-    recentBlockhash: blockhash,
-    instructions: userIxs,
-  }).compileToV0Message([bucketAlt, ...jupiterAlts]);
-  const userTx = new VersionedTransaction(message);
-  userTx.sign([config.userKey]);
-
-  console.log(`Sending swap-and-select tx (${userTx.serialize().length}B)…`);
-  const userSig = await connection.sendTransaction(userTx);
-  await connection.confirmTransaction({
-    signature: userSig,
-    blockhash,
-    lastValidBlockHeight,
-  });
-  console.log(`  tx: ${userSig}`);
-
-  // 6. Parse IntentSelected event.
-  const selection = await parseIntentSelected(connection, userSig, entries);
+  const localRoute: Route = {
+    salt,
+    deadline: routeDeadline,
+    portal: PORTAL_PROGRAM_ID.toBytes(),
+    nativeAmount: 0n,
+    tokens: [{ token: PENGU_MINT, amount: inputAmount }],
+    calls: [
+      {
+        target: ECO_SWAP_GATEWAY_PROGRAM_ID.toBytes(),
+        data: encodeCalldataWithAccounts(openCallIx, writableSet),
+      },
+      {
+        target: jupiterSwapWeb3.programId.toBytes(),
+        data: encodeCalldataWithAccounts(jupiterSwapWeb3, writableSet),
+      },
+      {
+        target: ECO_SWAP_GATEWAY_PROGRAM_ID.toBytes(),
+        data: encodeCalldataWithAccounts(closeCallIx, writableSet),
+      },
+    ],
+  };
+  const localRouteBytes = encodeRoute(localRoute);
+  const localRouteHash = hashRoute(localRoute);
+  const localRewardHash = hashReward(localPenguReward);
+  const localIntentHash = computeIntentHash(
+    CHAIN_ID_SOLANA,
+    localRouteHash,
+    localRewardHash,
+  );
+  const [localVaultPdaPk] = vaultPda(localIntentHash);
+  const localVaultPenguAta = vaultAta(
+    localVaultPdaPk,
+    PENGU_MINT,
+    TOKEN_PROGRAM_ID,
+  );
+  console.log(`LOCAL intent_hash: 0x${hexOf(localIntentHash)}`);
+  console.log(
+    `  Route bytes: ${localRouteBytes.length}B (> 1232 → chunked upload)`,
+  );
   console.log();
-  console.log("Intent selected!");
+
+  // 6. Setup tx: fund the LOCAL intent with PENGU via portal.fund, pre-create
+  //    the executor's USDC ATA (so open can snapshot pre_balance=0), and
+  //    top up the executor PDA with lamports for the snapshot PDA's rent
+  //    (close_and_select closes the snapshot back to the executor, so
+  //    lamports get refunded on the round trip).
+  console.log("Sending setup tx (fund LOCAL intent + prep executor)…");
+  const setupIxs: TransactionInstruction[] = [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+    buildPortalFundInstruction({
+      payer: user,
+      funder: user,
+      vaultPda: localVaultPdaPk,
+      destination: CHAIN_ID_SOLANA,
+      routeHash: localRouteHash,
+      reward: localPenguReward,
+      allowPartial: false,
+      transfers: [
+        { from: userPenguAta, to: localVaultPenguAta, mint: PENGU_MINT },
+      ],
+    }),
+    createAssociatedTokenAccountIdempotentInstruction(
+      user,
+      executorUsdcAta,
+      executorPdaPk,
+      USDC_SOLANA,
+    ),
+    // 2M lamports ≈ 0.002 SOL covers the snapshot PDA's rent-exempt
+    // reserve. close_and_select refunds it to `user` (= executor) inside
+    // the Route, so repeated runs don't drift the executor's balance up.
+    SystemProgram.transfer({
+      fromPubkey: user,
+      toPubkey: executorPdaPk,
+      lamports: 2_000_000,
+    }),
+  ];
+  {
+    const { blockhash } = await connection.getLatestBlockhash();
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      instructions: setupIxs,
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([config.userKey]);
+    const sig = await sendAndConfirmRobust(connection, tx);
+    console.log(`  tx: ${sig}`);
+  }
+  console.log();
+
+  // 7. init_flash_fulfill_intent — commit the preimage, allocate buffer PDA.
+  console.log("Sending init_flash_fulfill_intent…");
+  {
+    const initIx = buildInitFlashFulfillIntentInstruction({
+      writer: user,
+      intentHash: localIntentHash,
+      routeHash: localRouteHash,
+      reward: localPenguReward,
+      routeTotalSize: localRouteBytes.length,
+    });
+    const { blockhash } = await connection.getLatestBlockhash();
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      // flash_fulfiller runs a 256 KB custom allocator (see eco-routes-svm
+      // flash-fulfiller/src/lib.rs). Any tx invoking this program MUST
+      // request the matching heap frame — otherwise the allocator hands out
+      // pointers past the VM's default 32 KB heap region and writes
+      // access-violate.
+      instructions: [
+        ComputeBudgetProgram.requestHeapFrame({ bytes: 256 * 1024 }),
+        initIx,
+      ],
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([config.userKey]);
+    const sig = await sendAndConfirmRobust(connection, tx);
+    console.log(`  tx: ${sig}`);
+  }
+
+  // 8. append_flash_fulfill_route_chunk — stream bytes into the buffer.
+  //    Final chunk auto-finalizes (keccak + Borsh-decode validation).
+  const chunks = chunkRouteBytes(localRouteBytes);
+  console.log(`Uploading Route in ${chunks.length} chunk(s)…`);
+  let offset = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const appendIx = buildAppendFlashFulfillRouteChunkInstruction({
+      writer: user,
+      intentHash: localIntentHash,
+      offset,
+      chunk,
+    });
+    const { blockhash } = await connection.getLatestBlockhash();
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      // flash_fulfiller's 256 KB allocator requires the matching heap frame
+      // on every invoking tx; see init_flash_fulfill_intent above for detail.
+      instructions: [
+        ComputeBudgetProgram.requestHeapFrame({ bytes: 256 * 1024 }),
+        appendIx,
+      ],
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([config.userKey]);
+    const sig = await sendAndConfirmRobust(connection, tx);
+    console.log(
+      `  chunk ${i + 1}/${chunks.length} (${chunk.length}B @ offset ${offset}): ${sig}`,
+    );
+    offset += chunk.length;
+  }
+  console.log();
+
+  // 9. flash_fulfill — prove → withdraw → fulfill → sweep, all atomic.
+  //    Has ~60+ accounts after adding Route-call accounts, so we build a
+  //    per-session ALT for the flash-fulfill fixed/derived accounts and
+  //    compose it with the existing bucketAlt + jupiterAlts.
+  const [flashVaultPk] = flashVaultPda();
+  const [flashFulfillIntentPk] = flashFulfillIntentPda(localIntentHash, user);
+  const [proofPk] = proofPda(localIntentHash);
+  const [proofCloserPk] = proofCloserPda();
+  const [fulfillMarkerPk] = fulfillMarkerPda(localIntentHash);
+  const [withdrawnMarkerPk] = withdrawnMarkerPda(localIntentHash);
+  const [localProverEventAuthorityPk] = eventAuthorityPda(
+    LOCAL_PROVER_PROGRAM_ID,
+  );
+  const [flashFulfillerEventAuthorityPk] = eventAuthorityPda(
+    FLASH_FULFILLER_PROGRAM_ID,
+  );
+  const flashVaultPenguAta = vaultAta(
+    flashVaultPk,
+    PENGU_MINT,
+    TOKEN_PROGRAM_ID,
+  );
+
+  const flashFulfillIx = buildFlashFulfillInstruction({
+    payer: user,
+    flashVault: flashVaultPk,
+    flashFulfillIntent: flashFulfillIntentPk,
+    claimant: user,
+    proof: proofPk,
+    intentVault: localVaultPdaPk,
+    withdrawnMarker: withdrawnMarkerPk,
+    proofCloser: proofCloserPk,
+    executor: executorPdaPk,
+    fulfillMarker: fulfillMarkerPk,
+    portalProgram: PORTAL_PROGRAM_ID,
+    localProverProgram: LOCAL_PROVER_PROGRAM_ID,
+    localProverEventAuthority: localProverEventAuthorityPk,
+    flashFulfillerEventAuthority: flashFulfillerEventAuthorityPk,
+    intentHash: localIntentHash,
+    rewardTransfers: [
+      { from: localVaultPenguAta, to: flashVaultPenguAta, mint: PENGU_MINT },
+    ],
+    routeTransfers: [
+      { from: flashVaultPenguAta, to: executorPenguAta, mint: PENGU_MINT },
+    ],
+    claimantAtas: [userPenguAta],
+    // Ordering is LOAD-BEARING: portal.fulfill's execute_route_calls consumes
+    // remaining_accounts in strict order, `calldata.account_count` entries per
+    // Call. Target program AccountInfos (eco_swap_gateway, Jupiter) must NOT
+    // fall inside any call's consumed range or Anchor will read them at the
+    // wrong field positions. We append them AFTER all consumed slots — they're
+    // still in the tx's loaded-accounts set (which is what Solana uses to
+    // resolve `invoke_signed` target program IDs), just not consumed by
+    // portal's per-call iterator.
+    callAccounts: [
+      ...openCallIx.keys,
+      ...jupiterSwapWeb3.keys,
+      ...closeCallIx.keys,
+      {
+        pubkey: ECO_SWAP_GATEWAY_PROGRAM_ID,
+        isSigner: false,
+        isWritable: false,
+      },
+      {
+        pubkey: jupiterSwapWeb3.programId,
+        isSigner: false,
+        isWritable: false,
+      },
+    ],
+  });
+
+  // Fresh ALT holding all flash_fulfill-specific pubkeys we can lift out.
+  // User keys (payer / claimant) stay in the tx header; everything else
+  // goes in the ALT to stay under 1232B with this account count.
+  const flashFulfillAltKeys = Array.from(
+    new Set(
+      [
+        flashVaultPk,
+        flashFulfillIntentPk,
+        proofPk,
+        localVaultPdaPk,
+        withdrawnMarkerPk,
+        proofCloserPk,
+        executorPdaPk,
+        fulfillMarkerPk,
+        PORTAL_PROGRAM_ID,
+        LOCAL_PROVER_PROGRAM_ID,
+        localProverEventAuthorityPk,
+        flashFulfillerEventAuthorityPk,
+        FLASH_FULFILLER_PROGRAM_ID,
+        ECO_SWAP_GATEWAY_PROGRAM_ID,
+        jupiterSwapWeb3.programId,
+        PENGU_MINT,
+        USDC_SOLANA,
+        localVaultPenguAta,
+        flashVaultPenguAta,
+        executorPenguAta,
+        executorUsdcAta,
+        userPenguAta,
+        ...openCallIx.keys.map((k) => k.pubkey),
+        ...closeCallIx.keys.map((k) => k.pubkey),
+      ].map((k) => k.toBase58()),
+    ),
+  ).map((s) => new PublicKey(s));
+
+  console.log(
+    `Creating per-quote flash-fulfill ALT (${flashFulfillAltKeys.length} entries)…`,
+  );
+  const flashFulfillAlt = await createAndExtendBucketAlt(
+    connection,
+    config.userKey,
+    flashFulfillAltKeys,
+  );
+  console.log(`  ALT: ${flashFulfillAlt.key.toBase58()}`);
+  console.log();
+
+  console.log("Sending flash_fulfill tx…");
+  let flashFulfillSig: string;
+  {
+    const { blockhash } = await connection.getLatestBlockhash();
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      // CU limit at the max (1.4M): flash_fulfill does prove + withdraw +
+      // fulfill + route-calls (incl. a full Jupiter swap) + sweeps in one
+      // invocation.
+      //
+      // RequestHeapFrame at the 256 KB cap: flash_fulfiller's PR #48 fix
+      // (zero-copy strip_call_accounts + Vec::with_capacity in cpi::fulfill)
+      // reduces heap pressure enough to pass a litesvm repro with the 32 KB
+      // default, but on mainnet the real CPI overhead (live account data
+      // marshalling, Jupiter's ~27 accounts, real Borsh round-trips) still
+      // exceeds 32 KB. Both pieces are load-bearing here — the program fix
+      // alone OOMs, and the heap bump alone OOMed pre-fix.
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        ComputeBudgetProgram.requestHeapFrame({ bytes: 256 * 1024 }),
+        flashFulfillIx,
+      ],
+    }).compileToV0Message([flashFulfillAlt, bucketAlt, ...jupiterAlts]);
+    const tx = new VersionedTransaction(msg);
+    tx.sign([config.userKey]);
+    console.log(`  serialized: ${tx.serialize().length}B`);
+    flashFulfillSig = await sendAndConfirmRobust(connection, tx);
+    console.log(`  tx: ${flashFulfillSig}`);
+  }
+
+  // 10. Parse IntentSelected from the flash_fulfill tx — this comes from
+  //     close_and_select_intent running as a Route call, and tells us which
+  //     bucket won (which downstream Base intent got funded).
+  const selection = await parseIntentSelected(
+    connection,
+    flashFulfillSig,
+    entries,
+  );
+  console.log();
+  console.log("Downstream intent selected!");
   console.log(`  intentHash:    0x${hexOf(selection.intentHash)}`);
   console.log(`  bucketIndex:   ${selection.bucketIndex}`);
   console.log(`  rewardAmount:  ${selection.rewardAmount}`);
   console.log(`  swapDelta:     ${selection.delta} (USDC 6d)`);
   console.log();
 
-  logSwapSlippage("Source swap (PENGU → USDC on Solana)", {
+  logSwapSlippage("Source swap (PENGU → USDC inside flash_fulfill)", {
     expectedOut: jupiterOutAmount,
     minOut: jupiterMinOut,
     actualOut: selection.delta,
@@ -882,12 +1283,51 @@ async function main() {
     symbol: "USDC",
   });
 
-  // 7. Post-publish the winning route. Fire-and-log: publish is an SLA for
-  //    off-chain indexers, not required for fulfill (the intent is already
-  //    funded and the solver already holds the Route bytes). For routes with
-  //    multi-call EVM calldata (e.g. approve + exactInputSingle), the
-  //    serialized publish tx can exceed Solana's 1232-byte packet limit.
+  // 11. Re-emit portal::IntentFunded for the downstream (Base) intent.
+  //     close_and_select_intent funded the vault directly (no portal CPI),
+  //     so portal's canonical event didn't fire. A no-op portal.fund tx
+  //     (allow_partial=true, vault already fully funded → 0 transferred)
+  //     re-emits the canonical event for indexers keyed on it.
   const selectedEntry = entries[selection.bucketIndex];
+  const winningReward: Reward = {
+    ...selectedEntry.svmReward,
+    tokens: [
+      {
+        ...selectedEntry.svmReward.tokens[0],
+        amount: selection.rewardAmount,
+      },
+    ],
+  };
+  const winningVault = vaultPairs[selection.bucketIndex];
+  console.log("Re-emitting portal::IntentFunded (no-op portal.fund)…");
+  {
+    const reEmitIx = buildPortalFundInstruction({
+      payer: user,
+      funder: user,
+      vaultPda: winningVault.vaultPda,
+      destination: BASE_CHAIN_ID,
+      routeHash: selectedEntry.bucket.routeHash,
+      reward: winningReward,
+      allowPartial: true,
+      transfers: [
+        { from: userRewardAta, to: winningVault.vaultAta, mint: USDC_SOLANA },
+      ],
+    });
+    const { blockhash } = await connection.getLatestBlockhash();
+    const msg = new TransactionMessage({
+      payerKey: user,
+      recentBlockhash: blockhash,
+      instructions: [reEmitIx],
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([config.userKey]);
+    const sig = await sendAndConfirmRobust(connection, tx);
+    console.log(`  tx: ${sig}`);
+  }
+
+  // 12. Post-publish the winning route. Best-effort: publish is for
+  //     indexers, not required for fulfill. Can overflow 1232B for
+  //     multi-call EVM calldata — we log and move on if it does.
   console.log(
     `Publishing selected route (routeHash=0x${Buffer.from(selectedEntry.bucket.routeHash).toString("hex")})…`,
   );
@@ -905,8 +1345,7 @@ async function main() {
     }).compileToV0Message();
     const publishTx = new VersionedTransaction(publishMsg);
     publishTx.sign([config.userKey]);
-    const publishSig = await connection.sendTransaction(publishTx);
-    await connection.confirmTransaction(publishSig);
+    const publishSig = await sendAndConfirmRobust(connection, publishTx);
     console.log(`  publish tx: ${publishSig}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1034,6 +1473,53 @@ function randomSalt(): Uint8Array {
   const out = new Uint8Array(32);
   randomFillSync(out);
   return out;
+}
+
+/**
+ * Send a v0 tx and poll signature status until it confirms. Avoids the
+ * `connection.confirmTransaction({blockhash, lastValidBlockHeight})` path,
+ * which throws `TransactionExpiredBlockheightExceededError` the moment the
+ * blockhash ages out — even if the tx lands a moment later. This poller
+ * cares about the tx's *actual* status, not about the blockhash window.
+ */
+async function sendAndConfirmRobust(
+  connection: Connection,
+  tx: VersionedTransaction,
+  timeoutMs = 90_000,
+): Promise<string> {
+  // sendTransaction can transiently fail with "Blockhash not found" while
+  // the freshly-fetched blockhash propagates across the RPC's forwarder
+  // set. Retry a few times with backoff before giving up.
+  let sig: string | undefined;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      sig = await connection.sendTransaction(tx, {
+        skipPreflight: false,
+        maxRetries: 5,
+      });
+      break;
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/Blockhash not found|Node is behind/.test(msg)) throw e;
+      await sleep(1500 * (attempt + 1));
+    }
+  }
+  if (!sig) throw lastErr;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const s = await connection.getSignatureStatus(sig, {
+      searchTransactionHistory: true,
+    });
+    if (s.value?.err) {
+      throw new Error(`tx ${sig} failed: ${JSON.stringify(s.value.err)}`);
+    }
+    const c = s.value?.confirmationStatus;
+    if (c === "confirmed" || c === "finalized") return sig;
+    await sleep(1500);
+  }
+  throw new Error(`tx ${sig} not confirmed within ${timeoutMs / 1000}s`);
 }
 
 function sleep(ms: number): Promise<void> {
