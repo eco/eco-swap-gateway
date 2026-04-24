@@ -180,6 +180,11 @@ impl Context {
 
     pub fn reward_for_bucket(&self, base: &Reward, amount: u64) -> Reward {
         let mut r = base.clone();
+        assert_eq!(
+            r.tokens.len(),
+            1,
+            "base reward must have exactly one token (enforced on-chain by validate_base_reward)"
+        );
         r.tokens[0].amount = amount;
         r
     }
@@ -238,7 +243,6 @@ impl Context {
             AccountMeta::new(snapshot, false),
             AccountMeta::new(self.sweep_recipient_ata(), false),
             AccountMeta::new_readonly(self.mint, false),
-            AccountMeta::new_readonly(portal::ID, false),
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),
             AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
@@ -276,4 +280,39 @@ pub fn anchor_discriminator(ix_name: &str) -> Vec<u8> {
     let pre = format!("global:{}", ix_name);
     let hash = solana_sdk::hash::hash(pre.as_bytes()).to_bytes();
     hash[..8].to_vec()
+}
+
+/// Anchor event discriminator: `sha256("event:<Name>")[..8]`.
+pub fn anchor_event_discriminator(event_name: &str) -> [u8; 8] {
+    let pre = format!("event:{}", event_name);
+    let hash = solana_sdk::hash::hash(pre.as_bytes()).to_bytes();
+    let mut disc = [0u8; 8];
+    disc.copy_from_slice(&hash[..8]);
+    disc
+}
+
+/// Decode an Anchor event of type `E` from tx logs, returning the first match.
+/// Returns `None` if no `Program data:` line with `event_name`'s discriminator
+/// is present, or if the payload fails to borsh-deserialize as `E`.
+pub fn decode_first_event<E: anchor_lang::AnchorDeserialize>(
+    logs: &[String],
+    event_name: &str,
+) -> Option<E> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let disc = anchor_event_discriminator(event_name);
+    logs.iter().find_map(|l| {
+        let b64 = l.strip_prefix("Program data: ")?;
+        let bytes = STANDARD.decode(b64).ok()?;
+        let payload = bytes.strip_prefix(&disc[..])?;
+        E::try_from_slice(payload).ok()
+    })
+}
+
+/// Returns true if `logs` show a CPI into `program_id` — i.e. a line like
+/// `Program <id> invoke [N]`. Use to assert either that a dependency WAS
+/// called, or (with `!`) that a branch that would invoke it was skipped.
+pub fn logs_show_invoke_of(logs: &[String], program_id: &Pubkey) -> bool {
+    let needle = format!("Program {} invoke", program_id);
+    logs.iter().any(|l| l.starts_with(&needle))
 }

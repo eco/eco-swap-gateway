@@ -1,7 +1,8 @@
 mod common;
 
-use common::Context;
+use common::{decode_first_event, logs_show_invoke_of, Context};
 use eco_svm_std::Bytes32;
+use eco_swap_gateway::events::{IntentFunded, IntentSelected};
 use eco_swap_gateway::types::{Bucket, CloseAndSelectArgs};
 
 const DESTINATION: u64 = 8453; // Base mainnet chain id.
@@ -265,6 +266,148 @@ fn revert_base_reward_native_nonzero() {
 
     let res = ctx.send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)]);
     assert!(res.is_err(), "nonzero native reward must revert");
+}
+
+// ─── Event emission ─────────────────────────────────────────────────────────
+
+#[test]
+fn emits_intent_selected_and_intent_funded_events() {
+    use solana_sdk::signer::Signer;
+
+    let mut ctx = Context::new();
+    let buckets = three_buckets();
+    let expected_k = 1usize;
+    let delta = 250_000u64;
+
+    ctx.mint_to_user(PRE_BALANCE);
+    ctx.send_as_user(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(delta);
+
+    let base_reward = ctx.base_reward(ctx.unix_now() + 3600);
+    let vault_accounts: Vec<_> = buckets
+        .iter()
+        .map(|b| {
+            let (_, vpda, vata) = ctx.vault_accounts_for_bucket(DESTINATION, b, &base_reward);
+            (vpda, vata)
+        })
+        .collect();
+
+    let (expected_intent_hash, _, _) =
+        ctx.vault_accounts_for_bucket(DESTINATION, &buckets[expected_k], &base_reward);
+    let expected_buckets_hash = Context::compute_buckets_hash(&buckets);
+
+    let args = CloseAndSelectArgs {
+        destination: DESTINATION,
+        base_reward,
+        buckets: buckets.clone(),
+        buckets_hash: expected_buckets_hash,
+    };
+
+    let meta = ctx
+        .send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)])
+        .unwrap();
+
+    let selected = decode_first_event::<IntentSelected>(&meta.logs, "IntentSelected")
+        .expect("IntentSelected event missing");
+    assert_eq!(selected.intent_hash, expected_intent_hash);
+    assert_eq!(selected.user, ctx.user.pubkey());
+    assert_eq!(selected.delta, delta);
+    assert_eq!(selected.bucket_index, expected_k as u64);
+    assert_eq!(selected.reward_amount, buckets[expected_k].reward_amount);
+    assert_eq!(selected.buckets_hash, expected_buckets_hash);
+
+    let funded = decode_first_event::<IntentFunded>(&meta.logs, "IntentFunded")
+        .expect("IntentFunded event missing");
+    assert_eq!(funded.intent_hash, expected_intent_hash);
+    assert_eq!(funded.funder, ctx.user.pubkey());
+    assert!(funded.complete, "complete must be true — single-token, full-amount invariant");
+
+    // Sanity: both events carry the same intent hash so an indexer keying on
+    // it can correlate them.
+    assert_eq!(selected.intent_hash, funded.intent_hash);
+}
+
+#[test]
+fn idempotent_over_preexisting_vault_ata() {
+    // Same happy-path assertions as `happy_path_between_buckets`, but we
+    // pre-create the winning bucket's vault ATA before calling
+    // close_and_select_intent — exercising the `data_is_empty()` branch
+    // that skips the create CPI.
+    use anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account;
+    use solana_sdk::message::Message;
+    use solana_sdk::signer::Signer;
+    use solana_sdk::transaction::Transaction;
+
+    let mut ctx = Context::new();
+    let buckets = three_buckets();
+    let expected_k = 1usize;
+    let delta = 250_000;
+
+    ctx.mint_to_user(PRE_BALANCE);
+    ctx.send_as_user(&[ctx.open_ix()]).unwrap();
+    ctx.mint_to_user(delta);
+
+    let base_reward = ctx.base_reward(ctx.unix_now() + 3600);
+    let vault_accounts: Vec<_> = buckets
+        .iter()
+        .map(|b| {
+            let (_, vpda, vata) = ctx.vault_accounts_for_bucket(DESTINATION, b, &base_reward);
+            (vpda, vata)
+        })
+        .collect();
+    let (winning_vpda, _) = vault_accounts[expected_k];
+
+    // Pre-create the winning vault ATA using a different payer so rent is
+    // already accounted for when close_and_select_intent runs.
+    let create_ata_ix = create_associated_token_account(
+        &ctx.mint_authority.pubkey(),
+        &winning_vpda,
+        &ctx.mint,
+        &anchor_spl::token::ID,
+    );
+    let tx = Transaction::new(
+        &[&ctx.mint_authority],
+        Message::new(&[create_ata_ix], Some(&ctx.mint_authority.pubkey())),
+        ctx.svm.latest_blockhash(),
+    );
+    ctx.svm.send_transaction(tx).unwrap();
+
+    let args = CloseAndSelectArgs {
+        destination: DESTINATION,
+        base_reward: base_reward.clone(),
+        buckets: buckets.clone(),
+        buckets_hash: Context::compute_buckets_hash(&buckets),
+    };
+    let meta = ctx
+        .send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)])
+        .unwrap();
+
+    let reward_k = buckets[expected_k].reward_amount;
+    let surplus = delta - reward_k;
+    let (_, _, vata) =
+        ctx.vault_accounts_for_bucket(DESTINATION, &buckets[expected_k], &base_reward);
+
+    assert_eq!(ctx.token_balance(&ctx.user_ata()), PRE_BALANCE);
+    assert_eq!(ctx.token_balance(&vata), reward_k);
+    assert_eq!(ctx.token_balance(&ctx.sweep_recipient_ata()), surplus);
+
+    // Positive control: the token program MUST be invoked for the two
+    // `transfer_checked` CPIs (fund + surplus sweep). Asserting this first
+    // confirms `logs_show_invoke_of` is working against this test's log
+    // format before we trust the negative assertion below.
+    assert!(
+        logs_show_invoke_of(&meta.logs, &anchor_spl::token::ID),
+        "sanity: spl-token program must have been invoked; logs: {:?}",
+        meta.logs
+    );
+    // Prove the `data_is_empty()` skip branch was actually taken — if the
+    // instruction had fallen through to `associated_token::create`, the ATA
+    // program would appear as `Program <id> invoke [N]` in the logs.
+    assert!(
+        !logs_show_invoke_of(&meta.logs, &anchor_spl::associated_token::ID),
+        "associated_token_program should not have been invoked; logs: {:?}",
+        meta.logs
+    );
 }
 
 // ─── Open sanity ────────────────────────────────────────────────────────────

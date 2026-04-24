@@ -12,3 +12,14 @@ pub struct IntentSelected {
     pub reward_amount: u64,
     pub buckets_hash: Bytes32,
 }
+
+/// Emitted after the selected bucket's reward is transferred into the intent
+/// vault's ATA. Mirrors `portal::IntentFunded`'s field shape so off-chain
+/// indexers can subscribe to both programs with one schema.
+#[event]
+#[derive(new)]
+pub struct IntentFunded {
+    pub intent_hash: Bytes32,
+    pub funder: Pubkey,
+    pub complete: bool,
+}
