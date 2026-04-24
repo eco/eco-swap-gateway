@@ -316,7 +316,6 @@ export function buildCloseAndSelectInstruction(
     { pubkey: snapshot, isSigner: false, isWritable: true },
     { pubkey: accounts.sweepRecipientAta, isSigner: false, isWritable: true },
     { pubkey: accounts.mint, isSigner: false, isWritable: false },
-    { pubkey: PORTAL_PROGRAM_ID, isSigner: false, isWritable: false },
     { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     { pubkey: TOKEN_2022_PROGRAM_ID, isSigner: false, isWritable: false },
     {

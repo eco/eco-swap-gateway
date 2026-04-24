@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anchor-lang = { workspace = true }
 anchor-spl = { workspace = true }
+base64 = "0.22"
 eco-svm-std = { workspace = true }
 eco-swap-gateway = { workspace = true, features = ["no-entrypoint"] }
 litesvm = "0.6.1"

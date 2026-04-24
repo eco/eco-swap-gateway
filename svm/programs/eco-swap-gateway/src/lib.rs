@@ -21,9 +21,12 @@ pub mod eco_swap_gateway {
         instructions::open(ctx)
     }
 
-    /// Measure delta vs. snapshot, floor-select a bucket, CPI `Portal::fund`
-    /// for that bucket, sweep any surplus to `sweep_recipient_ata`, then
-    /// close the snapshot PDA.
+    /// Measure delta vs. snapshot, floor-select a bucket, transfer the
+    /// bucket's reward directly into the intent's canonical vault ATA
+    /// (creating it idempotently), sweep any surplus to
+    /// `sweep_recipient_ata`, then close the snapshot PDA. Emits
+    /// `IntentSelected` + `IntentFunded`. No Portal CPI — lets this ix
+    /// run nested under `portal::fulfill` without tripping reentrancy.
     pub fn close_and_select_intent<'info>(
         ctx: Context<'_, '_, '_, 'info, CloseAndSelectIntent<'info>>,
         args: CloseAndSelectArgs,
