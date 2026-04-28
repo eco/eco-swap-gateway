@@ -43,6 +43,35 @@ export const USDC_SOLANA = new PublicKey(
 );
 export const PENGU_DECIMALS = 6;
 
+// ─── Native SOL input (used by the native-input variant of the demo) ──────
+// wSOL mint is the same on every Solana cluster; canonical address.
+export const WSOL_MINT = new PublicKey(
+  "So11111111111111111111111111111111111111112",
+);
+export const SOL_DECIMALS = 9;
+// Lamports the user contributes as the swap input. Default 0.01 SOL keeps
+// the demo cheap (~$2 at $200/SOL) while still producing a meaningful swap
+// output. Override via env for larger or smaller test amounts.
+export const SOL_INPUT_LAMPORTS = parseLamports(
+  process.env.SOL_INPUT_LAMPORTS ?? "10000000",
+);
+
+function parseLamports(raw: string): bigint {
+  // BigInt() throws SyntaxError on non-integer input with a stack trace deep
+  // inside V8 — wrap it so misconfigured envs surface a clear actionable
+  // message before the script even starts.
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new Error(
+      `SOL_INPUT_LAMPORTS must be a non-negative integer (lamports), got: ${raw}`,
+    );
+  }
+  const value = BigInt(raw);
+  if (value === 0n) {
+    throw new Error("SOL_INPUT_LAMPORTS must be > 0");
+  }
+  return value;
+}
+
 // ─── Base (destination) ────────────────────────────────────────────────────
 
 export const USDC_BASE: Address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";

@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "demo": "tsx src/bucketedSwap.ts"
+    "demo": "tsx src/bucketedSwap.ts",
+    "demo:native": "tsx src/nativeBucketedSwap.ts"
   },
   "dependencies": {
     "@noble/hashes": "^1.5.0",
