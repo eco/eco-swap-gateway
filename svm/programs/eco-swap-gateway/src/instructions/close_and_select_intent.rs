@@ -5,16 +5,15 @@ use anchor_spl::associated_token::{
 use anchor_spl::token::Token;
 use anchor_spl::token_2022::Token2022;
 use anchor_spl::token_interface::{transfer_checked, Mint, TokenAccount, TransferChecked};
-use eco_svm_std::Bytes32;
 use portal::state::vault_pda;
 use portal::types::{intent_hash as compute_intent_hash, Reward};
-use tiny_keccak::{Hasher, Keccak};
 
 use crate::errors::GatewayError;
 use crate::events::{IntentFunded, IntentSelected};
+use crate::instructions::shared::{validate_base_reward_common, validate_buckets_and_pick};
 use crate::mint_safety::require_safe_mint;
 use crate::state::{SwapSnapshot, SNAPSHOT_SEED};
-use crate::types::{Bucket, CloseAndSelectArgs, MAX_BUCKETS};
+use crate::types::CloseAndSelectArgs;
 
 #[derive(Accounts)]
 #[instruction(args: CloseAndSelectArgs)]
@@ -72,12 +71,8 @@ pub fn close_and_select_intent<'info>(
         buckets_hash,
     } = args;
 
-    // --- Base-reward + bucket invariants ---
+    // --- Base-reward invariants (SPL shape) ---
     validate_base_reward(&base_reward, &ctx.accounts.mint.key())?;
-    require!(
-        !buckets.is_empty() && buckets.len() <= MAX_BUCKETS,
-        GatewayError::InvalidBucketCount
-    );
 
     let now = Clock::get()?.unix_timestamp.max(0) as u64;
     require!(base_reward.deadline > now, GatewayError::DeadlineExpired);
@@ -92,34 +87,10 @@ pub fn close_and_select_intent<'info>(
         .amount
         .checked_sub(ctx.accounts.snapshot.pre_balance)
         .ok_or(GatewayError::ZeroDelta)?;
-    require!(delta > 0, GatewayError::ZeroDelta);
-    require!(
-        delta >= buckets[0].reward_amount,
-        GatewayError::DeltaBelowFloor
-    );
 
-    // --- buckets_hash sanity (verify what the user signed matches the args) ---
-    let computed_hash: Bytes32 = keccak_buckets(&buckets)?.into();
-    require!(
-        computed_hash == buckets_hash,
-        GatewayError::BucketsHashMismatch
-    );
-
-    // --- Single-pass ascending validation + floor selection ---
-    let mut k: usize = 0;
-    let mut prev = buckets[0].reward_amount;
-    for (i, b) in buckets.iter().enumerate().skip(1) {
-        require!(
-            b.reward_amount > prev,
-            GatewayError::BucketsNotAscending
-        );
-        if b.reward_amount <= delta {
-            k = i;
-        }
-        prev = b.reward_amount;
-    }
-    let reward_amount_k = buckets[k].reward_amount;
-    let route_hash_k = buckets[k].route_hash;
+    // --- Bucket validation + floor selection (shared with the native ix) ---
+    let (k, reward_amount_k, route_hash_k, computed_hash) =
+        validate_buckets_and_pick(&buckets, buckets_hash, delta)?;
 
     // --- Remaining-accounts layout: [vault_pda_k, vault_ata_k] pairs ---
     let remaining = ctx.remaining_accounts;
@@ -238,14 +209,7 @@ pub fn close_and_select_intent<'info>(
 }
 
 fn validate_base_reward(reward: &Reward, mint_key: &Pubkey) -> Result<()> {
-    require!(
-        reward.creator != Pubkey::default(),
-        GatewayError::InvalidRewardCreator
-    );
-    require!(
-        reward.prover != Pubkey::default(),
-        GatewayError::InvalidRewardProver
-    );
+    validate_base_reward_common(reward)?;
     require!(
         reward.native_amount == 0,
         GatewayError::InvalidBaseRewardNative
@@ -263,17 +227,6 @@ fn validate_base_reward(reward: &Reward, mint_key: &Pubkey) -> Result<()> {
         GatewayError::InvalidBaseRewardAmount
     );
     Ok(())
-}
-
-fn keccak_buckets(buckets: &[Bucket]) -> Result<[u8; 32]> {
-    // Borsh-serialize `Vec<Bucket>` (length-prefixed) so off-chain builders can
-    // reproduce the hash from the same sequence.
-    let encoded = buckets.to_vec().try_to_vec()?;
-    let mut hasher = Keccak::v256();
-    hasher.update(&encoded);
-    let mut out = [0u8; 32];
-    hasher.finalize(&mut out);
-    Ok(out)
 }
 
 /// Pick the token program that owns `mint` — Token vs Token-2022.

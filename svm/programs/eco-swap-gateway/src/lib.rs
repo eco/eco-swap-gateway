@@ -33,4 +33,17 @@ pub mod eco_swap_gateway {
     ) -> Result<()> {
         instructions::close_and_select_intent(ctx, args)
     }
+
+    /// Native-reward variant of `close_and_select_intent`. The LOCAL intent's
+    /// reward is `nativeAmount > 0, tokens = []`; bucket amounts are
+    /// interpreted as lamports. Converts the user's wSOL ATA into native
+    /// lamports via `close_account` and forwards the bucket's reward to
+    /// the vault PDA via `system::transfer`. Surplus lamports go to a
+    /// system-owned `sweep_lamport_recipient`. Same no-Portal-CPI guarantee.
+    pub fn close_and_select_intent_native<'info>(
+        ctx: Context<'_, '_, '_, 'info, CloseAndSelectIntentNative<'info>>,
+        args: CloseAndSelectArgs,
+    ) -> Result<()> {
+        instructions::close_and_select_intent_native(ctx, args)
+    }
 }

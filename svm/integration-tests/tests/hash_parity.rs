@@ -26,6 +26,19 @@ fn fixture_reward() -> Reward {
     }
 }
 
+/// Native-reward shape: empty tokens, non-zero native_amount. Locks the
+/// Borsh encoding for the `Vec<TokenAmount>` length-prefix-zero case so a
+/// future schema change (reordering, adding a discriminator) flags here.
+fn fixture_reward_native() -> Reward {
+    Reward {
+        deadline: 1_700_000_000,
+        creator: Pubkey::new_from_array([2u8; 32]),
+        prover: Pubkey::new_from_array([3u8; 32]),
+        native_amount: 100,
+        tokens: vec![],
+    }
+}
+
 fn fixture_route(amount: u64) -> Route {
     Route {
         salt: [4u8; 32].into(),
@@ -76,6 +89,8 @@ fn hex(b: &Bytes32) -> String {
 
 const REWARD_HASH_HEX: &str =
     "8af572ac3d774567f11617bad36b815333064ad56168e1aec5b1683e7c98bd96";
+const REWARD_NATIVE_HASH_HEX: &str =
+    "33a31f5b8b20713afb15b0ca07c576368a6e4d1fca36c0702bc0d46d2df1be9c";
 const ROUTE_0_HASH_HEX: &str =
     "a3f050c1003e4c3ae7c168bfc06662dd9d6fa05a3056fb4b04d4e3a5db651db7";
 const BUCKETS_HASH_HEX: &str =
@@ -87,6 +102,7 @@ const INTENT_HASH_HEX: &str =
 #[ignore]
 fn print_goldens() {
     let reward = fixture_reward();
+    let reward_native = fixture_reward_native();
     let route0 = fixture_route(100);
     let buckets = fixture_buckets();
     let buckets_hash = keccak_buckets(&buckets);
@@ -96,15 +112,21 @@ fn print_goldens() {
         &reward.hash(),
     );
 
-    println!("reward_hash:  0x{}", hex(&reward.hash()));
-    println!("route_0_hash: 0x{}", hex(&route0.hash()));
-    println!("buckets_hash: 0x{}", hex(&buckets_hash));
-    println!("intent_hash:  0x{}", hex(&intent_hash));
+    println!("reward_hash:        0x{}", hex(&reward.hash()));
+    println!("reward_native_hash: 0x{}", hex(&reward_native.hash()));
+    println!("route_0_hash:       0x{}", hex(&route0.hash()));
+    println!("buckets_hash:       0x{}", hex(&buckets_hash));
+    println!("intent_hash:        0x{}", hex(&intent_hash));
 }
 
 #[test]
 fn reward_hash_stable() {
     assert_eq!(hex(&fixture_reward().hash()), REWARD_HASH_HEX);
+}
+
+#[test]
+fn reward_native_hash_stable() {
+    assert_eq!(hex(&fixture_reward_native().hash()), REWARD_NATIVE_HASH_HEX);
 }
 
 #[test]

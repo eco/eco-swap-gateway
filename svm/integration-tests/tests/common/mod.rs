@@ -9,9 +9,11 @@ use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
 use litesvm::LiteSVM;
 use portal::state::vault_pda;
 use portal::types::{intent_hash as compute_intent_hash, Reward, TokenAmount};
+use solana_sdk::account::Account;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::message::Message;
+use solana_sdk::program_option::COption;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::rent::Rent;
@@ -273,6 +275,181 @@ impl Context {
 
     pub fn unix_now(&self) -> u64 {
         self.svm.get_sysvar::<solana_sdk::clock::Clock>().unix_timestamp as u64
+    }
+
+    // ── Native (wSOL) flow helpers ───────────────────────────────────
+
+    /// Construct a context for the native-reward path: the SPL "mint" slot
+    /// is set to `NATIVE_MINT` (created on-the-fly in litesvm), and the user
+    /// gets a pre-initialized wSOL ATA. No custom mint, no separate
+    /// sweep-recipient ATA.
+    pub fn new_native() -> Self {
+        let mut svm = LiteSVM::new();
+        svm.add_program(portal::ID, PORTAL_BIN);
+        svm.add_program(eco_swap_gateway::ID, GATEWAY_BIN);
+
+        let user = Keypair::new();
+        let sweep_recipient = Keypair::new();
+        let mint_authority = Keypair::new();
+
+        svm.airdrop(&user.pubkey(), 10_000_000_000).unwrap();
+        svm.airdrop(&sweep_recipient.pubkey(), 1_000_000_000).unwrap();
+        svm.airdrop(&mint_authority.pubkey(), 10_000_000_000).unwrap();
+
+        // litesvm starts blank — NATIVE_MINT has to be injected before any
+        // wSOL ATA can be initialized. Create it as a regular SPL Mint with
+        // 9 decimals and no authorities (matches mainnet's NATIVE_MINT).
+        let native_mint_state = spl_token::state::Mint {
+            mint_authority: COption::None,
+            supply: 0,
+            decimals: 9,
+            is_initialized: true,
+            freeze_authority: COption::None,
+        };
+        let mut native_mint_data = vec![0u8; spl_token::state::Mint::LEN];
+        native_mint_state.pack_into_slice(&mut native_mint_data);
+        let rent = svm.get_sysvar::<Rent>();
+        svm.set_account(
+            spl_token::native_mint::ID,
+            Account {
+                lamports: rent.minimum_balance(spl_token::state::Mint::LEN),
+                data: native_mint_data,
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+        // Pre-create the user's wSOL ATA. Empty initially; tests fill it via
+        // `mint_to_user_native` which mocks Jupiter's swap-output behavior.
+        let create_user_wsol_ata = create_associated_token_account(
+            &mint_authority.pubkey(),
+            &user.pubkey(),
+            &spl_token::native_mint::ID,
+            &spl_token::ID,
+        );
+        let tx = Transaction::new(
+            &[&mint_authority],
+            Message::new(&[create_user_wsol_ata], Some(&mint_authority.pubkey())),
+            svm.latest_blockhash(),
+        );
+        svm.send_transaction(tx).unwrap();
+
+        Self {
+            svm,
+            user,
+            sweep_recipient,
+            mint_authority,
+            mint: spl_token::native_mint::ID,
+            prover: Keypair::new().pubkey(),
+        }
+    }
+
+    pub fn user_wsol_ata(&self) -> Pubkey {
+        get_associated_token_address(&self.user.pubkey(), &spl_token::native_mint::ID)
+    }
+
+    pub fn snapshot_pda_native(&self) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[b"snap", self.user_wsol_ata().as_ref()],
+            &eco_swap_gateway::ID,
+        )
+    }
+
+    /// Mock Jupiter's wSOL deposit: drop `amount` lamports onto the user's
+    /// wSOL ATA via system::transfer, then sync_native to update the SPL
+    /// `amount` field. Funded from `mint_authority` (which was airdropped).
+    pub fn mint_to_user_native(&mut self, amount: u64) {
+        let transfer_ix = solana_sdk::system_instruction::transfer(
+            &self.mint_authority.pubkey(),
+            &self.user_wsol_ata(),
+            amount,
+        );
+        let sync_ix =
+            spl_token::instruction::sync_native(&spl_token::ID, &self.user_wsol_ata()).unwrap();
+        let tx = Transaction::new(
+            &[&self.mint_authority],
+            Message::new(&[transfer_ix, sync_ix], Some(&self.mint_authority.pubkey())),
+            self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).unwrap();
+    }
+
+    pub fn open_ix_native(&self) -> Instruction {
+        let (snapshot, _) = self.snapshot_pda_native();
+        let data = anchor_discriminator("open");
+        Instruction::new_with_bytes(
+            eco_swap_gateway::ID,
+            &data,
+            vec![
+                AccountMeta::new(self.user.pubkey(), true),
+                AccountMeta::new_readonly(self.user_wsol_ata(), false),
+                AccountMeta::new(snapshot, false),
+                AccountMeta::new_readonly(system_program::ID, false),
+            ],
+        )
+    }
+
+    /// Build the native reward (`tokens: []`, `native_amount: 0` placeholder).
+    pub fn base_reward_native(&self, deadline: u64) -> Reward {
+        Reward {
+            deadline,
+            creator: self.user.pubkey(),
+            prover: self.prover,
+            native_amount: 0,
+            tokens: vec![],
+        }
+    }
+
+    pub fn reward_for_bucket_native(&self, base: &Reward, amount: u64) -> Reward {
+        let mut r = base.clone();
+        assert!(
+            r.tokens.is_empty(),
+            "native base reward must have empty tokens vec"
+        );
+        r.native_amount = amount;
+        r
+    }
+
+    pub fn vault_pda_for_bucket_native(
+        &self,
+        destination: u64,
+        bucket: &Bucket,
+        base_reward: &Reward,
+    ) -> (Bytes32, Pubkey) {
+        let reward_k = self.reward_for_bucket_native(base_reward, bucket.reward_amount);
+        let ih = compute_intent_hash(destination, &bucket.route_hash, &reward_k.hash());
+        let (vpda, _) = vault_pda(&ih);
+        (ih, vpda)
+    }
+
+    pub fn close_and_select_native_ix(
+        &self,
+        args: CloseAndSelectArgs,
+        vault_pdas: &[Pubkey],
+    ) -> Instruction {
+        let (snapshot, _) = self.snapshot_pda_native();
+        let mut data = anchor_discriminator("close_and_select_intent_native");
+        data.extend_from_slice(&args.try_to_vec().unwrap());
+
+        let mut metas = vec![
+            AccountMeta::new(self.user.pubkey(), true),
+            AccountMeta::new(self.user_wsol_ata(), false),
+            AccountMeta::new(snapshot, false),
+            AccountMeta::new(self.sweep_recipient.pubkey(), false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ];
+        for vpda in vault_pdas {
+            metas.push(AccountMeta::new(*vpda, false));
+        }
+
+        Instruction::new_with_bytes(eco_swap_gateway::ID, &data, metas)
+    }
+
+    pub fn lamports(&self, pk: &Pubkey) -> u64 {
+        self.svm.get_account(pk).map(|a| a.lamports).unwrap_or(0)
     }
 }
 

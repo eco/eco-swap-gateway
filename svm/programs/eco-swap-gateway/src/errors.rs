@@ -18,8 +18,10 @@ pub enum GatewayError {
     InvalidBaseRewardTokens,
     #[msg("Reward tokens[0].amount must be zero in the template.")]
     InvalidBaseRewardAmount,
-    #[msg("Reward native_amount must be zero for v1.")]
+    #[msg("Reward native_amount must be zero in the template (set per-bucket on-chain).")]
     InvalidBaseRewardNative,
+    #[msg("Native reward must have an empty tokens vec.")]
+    InvalidBaseRewardNativeTokens,
     #[msg("Reward creator must not be the default pubkey.")]
     InvalidRewardCreator,
     #[msg("Reward prover must not be the default pubkey.")]
