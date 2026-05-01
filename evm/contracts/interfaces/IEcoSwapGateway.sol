@@ -10,7 +10,7 @@ enum RouteType {
 }
 
 /// @notice Parameters for creating an intent from a swap output.
-/// @dev Fee parameters (feeNumerator, feeDenominator, flatFee) are caller-controlled
+/// @dev Fee parameters (retentionNumerator, retentionDenominator, flatFee) are caller-controlled
 ///      by design — this contract does not enforce protocol fees.
 struct IntentParams {
     uint64 destination;
@@ -21,8 +21,8 @@ struct IntentParams {
     address rewardCreator;
     address rewardProver;
     uint256 flatFee;
-    uint256 feeNumerator;
-    uint256 feeDenominator;
+    uint256 retentionNumerator;
+    uint256 retentionDenominator;
     uint8 sourceDecimals;
     uint8 destinationDecimals;
     bool allowPartial;

@@ -72,8 +72,8 @@ contract EcoSwapGatewayTest is Test {
             rewardCreator: user,
             rewardProver: prover,
             flatFee: 5_000,
-            feeNumerator: 997,
-            feeDenominator: 1000,
+            retentionNumerator: 3,
+            retentionDenominator: 1000,
             sourceDecimals: 18,
             destinationDecimals: 18,
             allowPartial: false,
@@ -146,13 +146,13 @@ contract EcoSwapGatewayTest is Test {
     }
 
     function test_feeCalculation() public {
-        // 2_000_000 * 995 / 1000 - 10_000 = 1_980_000
+        // 2_000_000 - (2_000_000 * 5 / 1000) - 10_000 = 1_980_000
         uint256 amount = 2_000_000;
         inputToken.mint(user, amount);
 
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 995;
-        intent.feeDenominator = 1000;
+        intent.retentionNumerator = 5;
+        intent.retentionDenominator = 1000;
         intent.flatFee = 10_000;
 
         vm.startPrank(user);
@@ -169,8 +169,8 @@ contract EcoSwapGatewayTest is Test {
 
     function test_noFee() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
 
         vm.startPrank(user);
@@ -229,8 +229,8 @@ contract EcoSwapGatewayTest is Test {
         });
 
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
 
         vm.deal(user, ethAmount);
@@ -268,8 +268,8 @@ contract EcoSwapGatewayTest is Test {
         });
 
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
 
         vm.startPrank(user);
@@ -438,8 +438,8 @@ contract EcoSwapGatewayTest is Test {
 
     function test_integration_portalIntentIsFunded() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
 
         bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
@@ -450,8 +450,8 @@ contract EcoSwapGatewayTest is Test {
 
     function test_integration_vaultHoldsSwapOutput() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
 
         bytes memory route = _buildRouteTemplate();
@@ -471,8 +471,8 @@ contract EcoSwapGatewayTest is Test {
     function test_integration_rewardStructCorrectness() public {
         IntentParams memory intent = _defaultIntentParams();
         intent.destination = 42;
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
 
         bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
@@ -498,8 +498,8 @@ contract EcoSwapGatewayTest is Test {
 
     function test_integration_routePatchCorrectness() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
 
         bytes32 intentHash = _doSwap(SWAP_AMOUNT, intent);
@@ -533,8 +533,8 @@ contract EcoSwapGatewayTest is Test {
 
     function test_integration_defaultReward_vaultHoldsFullSwapOutput() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
 
         bytes memory route = _buildRouteTemplate();
@@ -658,7 +658,7 @@ contract EcoSwapGatewayTest is Test {
 
     function test_revert_zeroDenom() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeDenominator = 0;
+        intent.retentionDenominator = 0;
 
         vm.startPrank(user);
         inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
@@ -669,13 +669,18 @@ contract EcoSwapGatewayTest is Test {
         vm.stopPrank();
     }
 
-    function test_revert_zeroNum() public {
+    function test_zeroRetentionIsValid() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 0;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1000;
+        intent.flatFee = 0;
 
         vm.startPrank(user);
         inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
-        vm.expectRevert(IEcoSwapGateway.InvalidScalar.selector);
+
+        vm.expectEmit(false, true, false, true);
+        emit IEcoSwapGateway.IntentCreated(bytes32(0), user, SWAP_AMOUNT);
+
         ecoSwapGateway.swapAndCreateIntent(
             address(inputToken), SWAP_AMOUNT, address(outputToken), _buildSwapCalls(SWAP_AMOUNT), intent, user
         );
@@ -684,8 +689,8 @@ contract EcoSwapGatewayTest is Test {
 
     function test_revert_numGreaterThanDenom() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1001;
-        intent.feeDenominator = 1000;
+        intent.retentionNumerator = 1001;
+        intent.retentionDenominator = 1000;
 
         vm.startPrank(user);
         inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
@@ -702,8 +707,8 @@ contract EcoSwapGatewayTest is Test {
         dex.setRate(0);
         IntentParams memory intent = _defaultIntentParams();
         intent.flatFee = 0;
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
 
         vm.startPrank(user);
         inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
@@ -716,8 +721,8 @@ contract EcoSwapGatewayTest is Test {
 
     function test_revert_routeAmountZero() public {
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = SWAP_AMOUNT;
 
         vm.startPrank(user);
@@ -780,8 +785,8 @@ contract EcoSwapGatewayTest is Test {
         outputToken.mint(address(dex), amount);
 
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 18;
         intent.destinationDecimals = 6;
@@ -803,8 +808,8 @@ contract EcoSwapGatewayTest is Test {
     function test_decimalConversion_destGreaterThanSource() public {
         // 6 → 18 decimals: routeAmount = 1_000_000 * 1e12 = 1e18
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 6;
         intent.destinationDecimals = 18;
@@ -825,8 +830,8 @@ contract EcoSwapGatewayTest is Test {
     function test_decimalConversion_sameDecimals() public {
         // 18 → 18: routeAmount == SWAP_AMOUNT
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 18;
         intent.destinationDecimals = 18;
@@ -846,8 +851,8 @@ contract EcoSwapGatewayTest is Test {
     function test_revert_decimalConversion_truncatesToZero() public {
         // 18 → 6 with tiny swapOutput: routeAmount truncates to 0
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 18;
         intent.destinationDecimals = 6;
@@ -871,8 +876,8 @@ contract EcoSwapGatewayTest is Test {
         intent.routeTemplate = svmTemplate;
         intent.tokensAmountOffset = 0;
         intent.calldataAmountOffset = 16;
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
         intent.routeType = RouteType.SVM;
 
@@ -886,8 +891,8 @@ contract EcoSwapGatewayTest is Test {
         intent.routeTemplate = svmTemplate;
         intent.tokensAmountOffset = 0;
         intent.calldataAmountOffset = type(uint32).max;
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
         intent.routeType = RouteType.SVM;
 
@@ -906,8 +911,8 @@ contract EcoSwapGatewayTest is Test {
         intent.routeTemplate = svmTemplate;
         intent.tokensAmountOffset = 0;
         intent.calldataAmountOffset = type(uint32).max;
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
         intent.sourceDecimals = 6;
         intent.destinationDecimals = 18;
@@ -929,8 +934,8 @@ contract EcoSwapGatewayTest is Test {
         intent.routeTemplate = svmTemplate;
         intent.tokensAmountOffset = 0;
         intent.calldataAmountOffset = type(uint32).max;
-        intent.feeNumerator = 1;
-        intent.feeDenominator = 1;
+        intent.retentionNumerator = 0;
+        intent.retentionDenominator = 1;
         intent.flatFee = 0;
         intent.routeType = RouteType.SVM;
 
@@ -969,17 +974,17 @@ contract EcoSwapGatewayTest is Test {
 
     function testFuzz_feeCalculation(
         uint128 swapOutput,
-        uint128 feeNumerator,
-        uint128 feeDenominator,
+        uint128 retentionNumerator,
+        uint128 retentionDenominator,
         uint128 flatFee
     ) public {
         vm.assume(swapOutput > 0);
-        vm.assume(feeDenominator > 0);
-        vm.assume(feeNumerator > 0 && feeNumerator <= feeDenominator);
+        vm.assume(retentionDenominator > 0);
+        vm.assume(retentionNumerator <= retentionDenominator);
 
-        uint256 afterFees = (uint256(swapOutput) * uint256(feeNumerator)) / uint256(feeDenominator);
-        vm.assume(flatFee < afterFees);
-        uint256 expectedRouteAmount = afterFees - uint256(flatFee);
+        uint256 retention = (uint256(swapOutput) * uint256(retentionNumerator)) / uint256(retentionDenominator);
+        vm.assume(uint256(swapOutput) > retention + uint256(flatFee));
+        uint256 expectedRouteAmount = uint256(swapOutput) - retention - uint256(flatFee);
         vm.assume(expectedRouteAmount > 0);
 
         uint256 inputAmount = 1_000_000;
@@ -988,16 +993,16 @@ contract EcoSwapGatewayTest is Test {
         uint256 actualOutput = (inputAmount * dexRate) / 1e18;
         vm.assume(actualOutput == swapOutput && actualOutput > 0);
 
-        uint256 actualAfterFees = (actualOutput * uint256(feeNumerator)) / uint256(feeDenominator);
-        vm.assume(uint256(flatFee) < actualAfterFees);
+        uint256 actualRetention = (actualOutput * uint256(retentionNumerator)) / uint256(retentionDenominator);
+        vm.assume(actualOutput > actualRetention + uint256(flatFee));
 
         dex.setRate(dexRate);
         inputToken.mint(user, inputAmount);
         outputToken.mint(address(dex), actualOutput);
 
         IntentParams memory intent = _defaultIntentParams();
-        intent.feeNumerator = uint256(feeNumerator);
-        intent.feeDenominator = uint256(feeDenominator);
+        intent.retentionNumerator = uint256(retentionNumerator);
+        intent.retentionDenominator = uint256(retentionDenominator);
         intent.flatFee = uint256(flatFee);
 
         vm.startPrank(user);
