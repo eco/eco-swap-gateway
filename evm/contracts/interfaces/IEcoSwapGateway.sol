@@ -92,6 +92,9 @@ interface IEcoSwapGateway {
     ///      must include token approval calls (e.g., `inputToken.approve(dex, amount)`)
     ///      in `swapCalls` — the contract does not pre-approve any targets.
     ///      Supports both EVM and SVM destination routes via `RouteType`.
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
     /// @param inputToken      ERC20 token to pull from the caller, or `address(0)`
     ///                        to signal native ETH input (amount is `msg.value`).
     /// @param inputAmount     Amount of inputToken to pull. Must be > 0 for ERC20
@@ -141,6 +144,9 @@ interface IEcoSwapGateway {
     ///      Native reward (outputToken == 0):
     ///        - `baseReward.tokens.length == 0`              → RewardMustHaveNoTokens
     ///        - `baseReward.nativeAmount == 0`               → RewardPlaceholderAmountNotZero
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
     /// @param inputToken      ERC20 token to pull from the caller, or `address(0)`
     ///                        to signal native ETH input (amount is `msg.value`).
     /// @param inputAmount     Amount of inputToken to pull. Must be > 0 for ERC20
