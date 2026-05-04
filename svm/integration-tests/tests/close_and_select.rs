@@ -1,7 +1,6 @@
 mod common;
 
 use common::{decode_first_event, logs_show_invoke_of, Context};
-use eco_svm_std::Bytes32;
 use eco_swap_gateway::events::{IntentFunded, IntentSelected};
 use eco_swap_gateway::types::{Bucket, CloseAndSelectArgs};
 
@@ -47,13 +46,10 @@ fn run_happy_path(delta: u64, expected_k: usize) {
             (vpda, vata)
         })
         .collect();
-    let buckets_hash = Context::compute_buckets_hash(&buckets);
-
     let args = CloseAndSelectArgs {
         destination: DESTINATION,
         base_reward: base_reward.clone(),
         buckets: buckets.clone(),
-        buckets_hash,
     };
     ctx.send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)])
         .unwrap();
@@ -111,7 +107,6 @@ fn revert_delta_below_floor() {
         destination: DESTINATION,
         base_reward,
         buckets: buckets.clone(),
-        buckets_hash: Context::compute_buckets_hash(&buckets),
     };
 
     let res = ctx.send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)]);
@@ -152,7 +147,6 @@ fn revert_buckets_not_ascending() {
         destination: DESTINATION,
         base_reward,
         buckets: buckets.clone(),
-        buckets_hash: Context::compute_buckets_hash(&buckets),
     };
 
     let res = ctx.send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)]);
@@ -172,41 +166,10 @@ fn revert_empty_buckets() {
         destination: DESTINATION,
         base_reward: ctx.base_reward(ctx.unix_now() + 3600),
         buckets,
-        buckets_hash: Bytes32::from([0u8; 32]),
     };
 
     let res = ctx.send_as_user(&[ctx.close_and_select_ix(args, &[])]);
     assert!(res.is_err(), "empty buckets must revert");
-}
-
-#[test]
-fn revert_buckets_hash_mismatch() {
-    let mut ctx = Context::new();
-    let buckets = three_buckets();
-
-    ctx.mint_to_user(PRE_BALANCE);
-    ctx.send_as_user(&[ctx.open_ix()]).unwrap();
-    ctx.mint_to_user(150_000);
-
-    let base_reward = ctx.base_reward(ctx.unix_now() + 3600);
-    let vault_accounts: Vec<_> = buckets
-        .iter()
-        .map(|b| {
-            let (_, vpda, vata) = ctx.vault_accounts_for_bucket(DESTINATION, b, &base_reward);
-            (vpda, vata)
-        })
-        .collect();
-
-    // Wrong hash — should fail BucketsHashMismatch.
-    let args = CloseAndSelectArgs {
-        destination: DESTINATION,
-        base_reward,
-        buckets: buckets.clone(),
-        buckets_hash: Bytes32::from([0xFFu8; 32]),
-    };
-
-    let res = ctx.send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)]);
-    assert!(res.is_err(), "bad buckets_hash must revert");
 }
 
 #[test]
@@ -231,7 +194,6 @@ fn revert_deadline_expired() {
         destination: DESTINATION,
         base_reward,
         buckets: buckets.clone(),
-        buckets_hash: Context::compute_buckets_hash(&buckets),
     };
 
     let res = ctx.send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)]);
@@ -261,7 +223,6 @@ fn revert_base_reward_native_nonzero() {
         destination: DESTINATION,
         base_reward,
         buckets: buckets.clone(),
-        buckets_hash: Context::compute_buckets_hash(&buckets),
     };
 
     let res = ctx.send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)]);
@@ -294,13 +255,11 @@ fn emits_intent_selected_and_intent_funded_events() {
 
     let (expected_intent_hash, _, _) =
         ctx.vault_accounts_for_bucket(DESTINATION, &buckets[expected_k], &base_reward);
-    let expected_buckets_hash = Context::compute_buckets_hash(&buckets);
 
     let args = CloseAndSelectArgs {
         destination: DESTINATION,
         base_reward,
         buckets: buckets.clone(),
-        buckets_hash: expected_buckets_hash,
     };
 
     let meta = ctx
@@ -314,7 +273,6 @@ fn emits_intent_selected_and_intent_funded_events() {
     assert_eq!(selected.delta, delta);
     assert_eq!(selected.bucket_index, expected_k as u64);
     assert_eq!(selected.reward_amount, buckets[expected_k].reward_amount);
-    assert_eq!(selected.buckets_hash, expected_buckets_hash);
 
     let funded = decode_first_event::<IntentFunded>(&meta.logs, "IntentFunded")
         .expect("IntentFunded event missing");
@@ -376,7 +334,6 @@ fn idempotent_over_preexisting_vault_ata() {
         destination: DESTINATION,
         base_reward: base_reward.clone(),
         buckets: buckets.clone(),
-        buckets_hash: Context::compute_buckets_hash(&buckets),
     };
     let meta = ctx
         .send_as_user(&[ctx.close_and_select_ix(args, &vault_accounts)])

@@ -1138,13 +1138,11 @@ contract EcoSwapGatewayTest is Test {
         buckets[1] = _bucketFor(1_000_000);
 
         Reward memory baseReward = _baseReward();
-        bytes32 expectedBucketsHash = keccak256(abi.encode(buckets));
-
         vm.startPrank(user);
         inputToken.approve(address(ecoSwapGateway), SWAP_AMOUNT);
         vm.expectEmit(false, true, false, true);
         emit IEcoSwapGateway.IntentSelected(
-            bytes32(0), user, SWAP_AMOUNT, 1, 1_000_000, expectedBucketsHash
+            bytes32(0), user, SWAP_AMOUNT, 1, 1_000_000
         );
         ecoSwapGateway.swapAndSelectIntent(
             address(inputToken),

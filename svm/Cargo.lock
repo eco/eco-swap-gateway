@@ -1086,7 +1086,6 @@ dependencies = [
  "eco-svm-std",
  "goldie",
  "portal",
- "tiny-keccak",
 ]
 
 [[package]]

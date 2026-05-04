@@ -186,11 +186,7 @@ async function main(): Promise<void> {
     bucketAlt,
   });
 
-  const selection = await parseIntentSelected(
-    ctx.connection,
-    flashSig,
-    entries,
-  );
+  const selection = await parseIntentSelected(ctx.connection, flashSig);
   console.log("\nDownstream intent selected!");
   console.log(`  intentHash:    0x${hexOf(selection.intentHash)}`);
   console.log(`  bucketIndex:   ${selection.bucketIndex}`);

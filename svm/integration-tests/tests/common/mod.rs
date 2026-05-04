@@ -19,7 +19,6 @@ use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
 use solana_sdk::system_program;
 use solana_sdk::transaction::Transaction;
-use tiny_keccak::{Hasher, Keccak};
 
 use eco_swap_gateway::types::{Bucket, CloseAndSelectArgs};
 
@@ -200,15 +199,6 @@ impl Context {
         let (vpda, _) = vault_pda(&ih);
         let vata = get_associated_token_address(&vpda, &self.mint);
         (ih, vpda, vata)
-    }
-
-    pub fn compute_buckets_hash(buckets: &[Bucket]) -> Bytes32 {
-        let encoded = buckets.to_vec().try_to_vec().unwrap();
-        let mut hasher = Keccak::v256();
-        let mut out = [0u8; 32];
-        hasher.update(&encoded);
-        hasher.finalize(&mut out);
-        out.into()
     }
 
     // ── Instructions ─────────────────────────────────────────────────

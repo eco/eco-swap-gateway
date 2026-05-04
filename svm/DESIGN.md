@@ -179,7 +179,7 @@ Flow:
    every `swapCalls[i].target` as well.
 9. Sweep residual `inputToken`, residual `outputToken`, and ETH to
    `sweepRecipient` (defaulting to `msg.sender` if zero).
-10. Emit `IntentSelected(intentHash, msg.sender, swapOutput, k, buckets[k].rewardAmount, bucketsHash)`.
+10. Emit `IntentSelected(intentHash, msg.sender, swapOutput, k, buckets[k].rewardAmount)`.
 
 #### EVM invariants (checked on-chain in `swapAndSelectIntent`)
 
@@ -199,7 +199,7 @@ Flow:
 #### Events
 
 - `IntentCreated(bytes32 indexed intentHash, address indexed user, uint256 swapOutput)` — emitted by Function 1.
-- `IntentSelected(bytes32 indexed intentHash, address indexed user, uint256 swapOutput, uint256 bucketIndex, uint256 rewardAmount, bytes32 bucketsHash)` — emitted by Function 2. `bucketsHash = keccak256(abi.encode(buckets))` so indexers and dispute tooling can reconstruct what the user signed vs. what the Solver published.
+- `IntentSelected(bytes32 indexed intentHash, address indexed user, uint256 swapOutput, uint256 bucketIndex, uint256 rewardAmount)` — emitted by Function 2.
 - `Portal.IntentFunded(intentHash, funder, complete)` is emitted by the Portal inside `fund`. Fillers index this.
 
 ## SVM interface — one program, two instructions
@@ -255,7 +255,6 @@ pub struct CloseAndSelectArgs {
     pub destination: u64,
     pub base_reward: Reward,        // tokens[0].amount = 0 placeholder
     pub buckets: Vec<Bucket>,       // strictly ascending by reward_amount
-    pub buckets_hash: [u8; 32],     // keccak(borsh(buckets)); emitted in event
 }
 ```
 
@@ -273,7 +272,7 @@ Flow:
    Portal internally derives `intent_hash`, validates the vault address, creates the vault ATA via `create_associated_token_account` if empty (`fund_context.rs:111-126`), and emits `IntentFunded`. `allow_partial=true` makes a front-run a no-op.
 8. Transfer `delta − buckets[k].reward_amount` from `user_reward_ata` to
    `sweep_recipient_ata` via `token_interface::transfer_checked`, with `user` as authority. The token program used is selected from `mint.owner` so the same helper works for both SPL Token and Token-2022 mints.
-9. Emit `IntentSelected { intent_hash, user, delta, bucket_index: k, reward_amount: buckets[k].reward_amount, buckets_hash }`.
+9. Emit `IntentSelected { intent_hash, user, delta, bucket_index: k, reward_amount: buckets[k].reward_amount }`.
 10. `snapshot` closes (Anchor's `close = user` handles the rent refund).
 
 ### Mint safety (`require_safe_mint`)
@@ -303,7 +302,7 @@ Per quote:
    - `reward_amount_0 = amountOutMinimum`; `reward_amount_{N-1} = quote`; intermediates linearly spaced: `reward_amount_k = amountOutMinimum + k × (quote − amountOutMinimum) / (N − 1)`.
    - `route_amount_k = reward_amount_k × feeNum / feeDen − flatFee` with source/destination decimal scaling. Fee model is shared with F1 (6 bps scalar + \$0.01 flat). Any drift between off-chain and on-chain fee computation silently corrupts `routeHash_k` and only surfaces at fulfillment — keep the formulas byte-identical.
 3. Construct full `Route` bytes per bucket with `tokens[0].amount = route_amount_k` and route calls encoded with that same amount. Salt is shared across all buckets.
-4. Compute `route_hash_k = keccak(route_k)`, `vault_pda_k = PDA(["vault", intent_hash_k])`, `vault_ata_k = ATA(vault_pda_k, mint)`, and `buckets_hash = keccak(abi.encode(buckets))` (EVM) or `keccak(borsh(buckets))` (SVM). **No publish calls yet.**
+4. Compute `route_hash_k = keccak(route_k)`, `vault_pda_k = PDA(["vault", intent_hash_k])`, `vault_ata_k = ATA(vault_pda_k, mint)`. **No publish calls yet.**
 5. Build the user's tx:
    - **SVM:** create per-quote ALT holding all 2N bucket accounts, wait for activation, build a v0 tx with `[SetComputeUnitLimit(400_000), open, <Jupiter ixs>, close_and_select_intent]`.
    - **EVM:** encode the `swapAndSelectIntent` calldata with `buckets[]`.
@@ -319,7 +318,7 @@ Per v0 tx with per-quote ALT:
 - Per-bucket writable: `vault_pda_k` + `vault_ata_k` = **2N**
 - Shared readonly: mint, Portal program, SPL programs, our program ≈ 6
 
-**N cap driven by instruction-data size, not writable-account count.** Each `Bucket` is 40 bytes (32 + 8); `base_reward` ≈ 100 bytes; Anchor overhead + `buckets_hash` + `destination` ≈ 50 bytes. At N=14, ix data ≈ 710 bytes, safely below the 1232-byte packet limit when combined with ComputeBudget + open + Jupiter ixs. Practical ceiling: **N ≤ 14**. If `Reward` or other Solver-chosen fields grow, re-budget.
+**N cap driven by instruction-data size, not writable-account count.** Each `Bucket` is 40 bytes (32 + 8); `base_reward` ≈ 100 bytes; Anchor overhead + `destination` ≈ 18 bytes. At N=14, ix data ≈ 678 bytes, safely below the 1232-byte packet limit when combined with ComputeBudget + open + Jupiter ixs. Practical ceiling: **N ≤ 14**. If `Reward` or other Solver-chosen fields grow, re-budget.
 
 Writable-account ceiling (`4 + 2N`) is 32 at N=14 — well under Solana's v0-with-ALT caps (64 writable / 128 total loaded).
 
@@ -351,7 +350,7 @@ Total worst-case (with vault ATA creation): ~70–85k CU. Budget `SetComputeUnit
 | `base_reward.deadline > now`, creator/prover ≠ 0 | Solver | **Checked on-chain** |
 | `sweepRecipient != self, != PORTAL` | Caller | **Checked on-chain** |
 | `mint` has no unsafe Token-2022 extensions | Solver (via mint choice) | **Checked on-chain** via `require_safe_mint` (see "Mint safety") |
-| `route_hash_k` corresponds to a real route the Solver will publish | Solver | **Not checked on-chain.** No indexed event exists pre-signing under the post-publish model — UI renders decoded `Route` bytes and user trusts. Post-tx, if the Solver fails to publish (or publishes bytes hashing to a different `intent_hash`), fillers never index the funded vault and the reward refunds after `reward.deadline`. Solver is incentive-aligned: only publishing the winning route produces a fill-and-paid outcome. `bucketsHash` is emitted in `IntentSelected` for post-hoc auditability. |
+| `route_hash_k` corresponds to a real route the Solver will publish | Solver | **Not checked on-chain.** No indexed event exists pre-signing under the post-publish model — UI renders decoded `Route` bytes and user trusts. Post-tx, if the Solver fails to publish (or publishes bytes hashing to a different `intent_hash`), fillers never index the funded vault and the reward refunds after `reward.deadline`. Solver is incentive-aligned: only publishing the winning route produces a fill-and-paid outcome. |
 | `route_amount_k = f(reward_amount_k)` (formula honesty) | Solver | **Not checked on-chain.** Route bytes are never reconstructed in the helper. UI must render the decoded route on the quote for user review. Off-chain and on-chain fee math must match byte-for-byte; drift silently corrupts `routeHash_k` and only surfaces at fulfillment. |
 | `base_reward.creator, prover, deadline` | Solver | **Not checked for correctness** beyond non-zero and non-expired. User-level trust. |
 | `vault_pda_k` matches `intent_hash_k` | Tx construction | **Checked on-chain** by Portal (`fund.rs:49-52`). Mismatch reverts. |
@@ -375,7 +374,7 @@ The front-end / wallet is a trust-critical component for the two "Not checked on
 - Multiple reward tokens per intent.
 - Split Jupiter / multi-tx routes.
 - Admin/pause switch. Neither the existing `EcoSwapGateway.sol` nor this revision includes one; evaluate once live volume exists.
-- Solver attestation signatures. Current model relies on UI rendering of the decoded route + post-tx monitoring of the expected `IntentPublished` event; an on-chain signed attestation over `(buckets_hash, route_k)` per bucket is the next step if we want on-chain accountability.
+- Solver attestation signatures. Current model relies on UI rendering of the decoded route + post-tx monitoring of the expected `IntentPublished` event; an on-chain signed attestation over `route_k` per bucket is the next step if we want on-chain accountability.
 
 ## Open questions
 

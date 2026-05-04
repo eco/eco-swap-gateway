@@ -28,8 +28,6 @@ pub enum GatewayError {
     DeadlineExpired,
     #[msg("Mint carries a Token-2022 extension that is not safe for this program.")]
     UnsafeMintExtension,
-    #[msg("Provided buckets_hash does not match keccak(borsh(buckets)).")]
-    BucketsHashMismatch,
     #[msg("The number of remaining accounts does not match 2 * buckets.len().")]
     InvalidRemainingAccounts,
     #[msg("vault_pda_k at the expected offset does not match the derived PDA.")]

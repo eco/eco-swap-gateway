@@ -53,8 +53,7 @@ interface IEcoSwapGateway {
         address indexed user,
         uint256 swapOutput,
         uint256 bucketIndex,
-        uint256 rewardAmount,
-        bytes32 bucketsHash
+        uint256 rewardAmount
     );
 
     // --- Errors ---

@@ -23,5 +23,4 @@ pub struct CloseAndSelectArgs {
     pub destination: u64,
     pub base_reward: Reward,
     pub buckets: Vec<Bucket>,
-    pub buckets_hash: Bytes32,
 }

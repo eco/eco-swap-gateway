@@ -24,7 +24,6 @@ anchor-spl = { workspace = true }
 derive-new = { workspace = true }
 eco-svm-std = { workspace = true }
 portal = { workspace = true }
-tiny-keccak = { workspace = true }
 
 [dev-dependencies]
 goldie = { workspace = true }
