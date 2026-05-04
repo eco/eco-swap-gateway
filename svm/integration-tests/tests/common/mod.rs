@@ -109,7 +109,7 @@ impl Context {
         get_associated_token_address(&self.user.pubkey(), &self.mint)
     }
 
-    pub fn sweep_recipient_ata(&self) -> Pubkey {
+    pub fn sweep_recipient_token_account(&self) -> Pubkey {
         get_associated_token_address(&self.sweep_recipient.pubkey(), &self.mint)
     }
 
@@ -241,7 +241,7 @@ impl Context {
             AccountMeta::new(self.user.pubkey(), true),
             AccountMeta::new(self.user_ata(), false),
             AccountMeta::new(snapshot, false),
-            AccountMeta::new(self.sweep_recipient_ata(), false),
+            AccountMeta::new(self.sweep_recipient_token_account(), false),
             AccountMeta::new_readonly(self.mint, false),
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new_readonly(anchor_spl::token_2022::ID, false),

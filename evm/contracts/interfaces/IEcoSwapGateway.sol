@@ -10,7 +10,7 @@ enum RouteType {
 }
 
 /// @notice Parameters for creating an intent from a swap output.
-/// @dev Fee parameters (feeNumerator, feeDenominator, flatFee) are caller-controlled
+/// @dev Fee parameters (retentionNumerator, retentionDenominator, flatFee) are caller-controlled
 ///      by design — this contract does not enforce protocol fees.
 struct IntentParams {
     uint64 destination;
@@ -21,8 +21,8 @@ struct IntentParams {
     address rewardCreator;
     address rewardProver;
     uint256 flatFee;
-    uint256 feeNumerator;
-    uint256 feeDenominator;
+    uint256 retentionNumerator;
+    uint256 retentionDenominator;
     uint8 sourceDecimals;
     uint8 destinationDecimals;
     bool allowPartial;
@@ -94,7 +94,20 @@ interface IEcoSwapGateway {
     ///      Callers must include token approval calls (e.g.,
     ///      `inputToken.approve(dex, amount)`) in `swapCalls` — the contract
     ///      does not pre-approve any targets.
+    ///      Does not support fee-on-transfer tokens as `outputToken`. Callers
+    ///      must include token approval calls (e.g., `inputToken.approve(dex, amount)`)
+    ///      in `swapCalls` — the contract does not pre-approve any targets.
+    ///      Post-swap cleanup sweeps residual token and ETH balances but does
+    ///      NOT revoke any `inputToken` allowances granted to `swapCalls[i].target`.
+    ///      Callers leaving non-zero residual allowances (e.g. `type(uint256).max`
+    ///      or any over-approval) SHOULD append an explicit
+    ///      `inputToken.forceApprove(target, 0)` entry to `swapCalls` after the
+    ///      swap that consumes the approval, otherwise the gateway holds open
+    ///      attack surface against any subsequent `safeTransferFrom` pull.
     ///      Supports both EVM and SVM destination routes via `RouteType`.
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
     /// @param inputToken      ERC20 token to pull from the caller, or `address(0)`
     ///                        to signal native ETH input (amount is `msg.value`).
     /// @param inputAmount     Amount of inputToken to pull. Must be > 0 for ERC20
@@ -144,6 +157,14 @@ interface IEcoSwapGateway {
     ///      Native reward (outputToken == 0):
     ///        - `baseReward.tokens.length == 0`              → RewardMustHaveNoTokens
     ///        - `baseReward.nativeAmount == 0`               → RewardPlaceholderAmountNotZero
+    ///      Residual-allowance behaviour: cleanup sweeps balances but does NOT
+    ///      revoke `inputToken` allowances granted by `swapCalls` to each
+    ///      `swapCalls[i].target`. Callers SHOULD append an explicit
+    ///      `inputToken.forceApprove(target, 0)` entry to `swapCalls` whenever
+    ///      a non-zero residual would otherwise persist past the swap.
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
     /// @param inputToken      ERC20 token to pull from the caller, or `address(0)`
     ///                        to signal native ETH input (amount is `msg.value`).
     /// @param inputAmount     Amount of inputToken to pull. Must be > 0 for ERC20

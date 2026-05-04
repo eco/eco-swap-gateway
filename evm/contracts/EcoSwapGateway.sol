@@ -57,7 +57,7 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         address resolvedSweep = _resolveSweepRecipient(sweepRecipient);
         if (intent.rewardCreator == address(0)) revert InvalidRewardCreator();
         if (intent.rewardProver == address(0)) revert InvalidRewardProver();
-        if (intent.feeDenominator == 0 || intent.feeNumerator == 0 || intent.feeNumerator > intent.feeDenominator) {
+        if (intent.retentionDenominator == 0 || intent.retentionNumerator > intent.retentionDenominator) {
             revert InvalidScalar();
         }
 
@@ -205,6 +205,32 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
 
     // --- Internal helpers ---
 
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
+    /// @dev Pulls `inputAmount` of `inputToken` (or accepts `msg.value` for
+    ///      native input), then dispatches `swapCalls` and measures the
+    ///      `outputToken` balance delta.
+    ///
+    ///      Residual-allowance behaviour: `swapCalls` are caller-supplied and
+    ///      typically include one or more `inputToken.approve(target, x)`
+    ///      calls so the DEX can pull tokens via `transferFrom`. Neither this
+    ///      function nor `_cleanup` revokes any of those allowances —
+    ///      `_cleanup` only sweeps residual ERC-20 balances and ETH. Whatever
+    ///      `inputToken` allowance remains on each `swapCalls[i].target` at
+    ///      the end of this call persists across the transaction.
+    ///
+    ///      On the happy path (e.g. `forceApprove(target, exactAmount)` plus
+    ///      a matching `transferFrom`) the residual is zero, but callers
+    ///      cannot rely on that for arbitrary `swapCalls`: any over-approval,
+    ///      `type(uint256).max` allowance, or skipped pull leaves a non-zero
+    ///      allowance on `target`. The exposure window is bounded — it
+    ///      starts when `safeTransferFrom` pulls `inputToken` from the user
+    ///      and ends when the swap consumes those tokens — but a buggy or
+    ///      malicious `target` could drain whatever the gateway holds at
+    ///      that moment. Callers leaving residual allowances SHOULD include
+    ///      explicit `inputToken.forceApprove(target, 0)` entries inside
+    ///      `swapCalls` after the swap step that consumes the approval.
     function _executeSwap(
         address inputToken,
         uint256 inputAmount,
@@ -244,9 +270,9 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         pure
         returns (bytes memory route)
     {
-        uint256 afterFees = (swapOutput * intent.feeNumerator) / intent.feeDenominator;
-        if (afterFees <= intent.flatFee) revert RouteAmountZero();
-        uint256 routeAmount = afterFees - intent.flatFee;
+        uint256 retention = (swapOutput * intent.retentionNumerator) / intent.retentionDenominator;
+        if (swapOutput <= retention + intent.flatFee) revert RouteAmountZero();
+        uint256 routeAmount = swapOutput - retention - intent.flatFee;
 
         if (intent.sourceDecimals > intent.destinationDecimals) {
             routeAmount = routeAmount / (10 ** (intent.sourceDecimals - intent.destinationDecimals));
@@ -334,10 +360,16 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
     }
 
     /// @dev Shared post-intent cleanup for F1 and F2: sweep residual input/output
-    ///      token balances and any leftover ETH to `to`. Portal and swap-target
-    ///      allowances are left at their natural post-consumption value (0 on
-    ///      the happy path, since `forceApprove`+exact-amount `transferFrom`
-    ///      and DEX swaps consume exactly what was approved).
+    ///      token balances and any leftover ETH to `to`. This function does
+    ///      NOT revoke any ERC-20 allowances — neither the `outputToken`
+    ///      allowance granted to `PORTAL` (left at its natural
+    ///      post-consumption value of 0 because `forceApprove` matches the
+    ///      exact amount Portal pulls) nor the `inputToken` allowances
+    ///      granted by `swapCalls` to each `swapCalls[i].target`. Any
+    ///      residual DEX allowance therefore persists across the transaction.
+    ///      See `_executeSwap` for the full residual-allowance contract and
+    ///      the recommended caller-side mitigation
+    ///      (`inputToken.forceApprove(target, 0)` inside `swapCalls`).
     function _cleanup(address inputToken, address outputToken, address to) internal {
         // address(0) signals native ETH — no ERC20 to sweep on that side;
         // leftover ETH (surplus + refunds) is swept by _sweepETH below.
