@@ -88,6 +88,12 @@ interface IEcoSwapGateway {
     ///         caller-supplied route template with the computed route amount,
     ///         and creates + funds an intent via `Portal.publishAndFund`.
     /// @dev Reward equals the full `swapOutput` (balance delta on `outputToken`).
+    ///      Does not support fee-on-transfer or rebasing tokens as `outputToken`
+    ///      (any token whose balance changes between the post-swap snapshot and
+    ///      Portal's `transferFrom` will produce an incorrect reward measurement).
+    ///      Callers must include token approval calls (e.g.,
+    ///      `inputToken.approve(dex, amount)`) in `swapCalls` — the contract
+    ///      does not pre-approve any targets.
     ///      Does not support fee-on-transfer tokens as `outputToken`. Callers
     ///      must include token approval calls (e.g., `inputToken.approve(dex, amount)`)
     ///      in `swapCalls` — the contract does not pre-approve any targets.

@@ -21,7 +21,9 @@ import {IEcoSwapGateway, IntentParams, RouteType, Bucket} from "./interfaces/IEc
 ///              (≤ swap output); surplus is swept to `sweepRecipient`. Funding
 ///              is deterministic in `(destination, routeHash, reward)`, so the
 ///              selected intent does not need to have been published first.
-/// @dev Does not support fee-on-transfer tokens as outputToken.
+/// @dev Does not support fee-on-transfer or rebasing tokens as outputToken
+///      (any token whose balance changes between the post-swap snapshot and
+///      Portal's `transferFrom` will produce an incorrect reward measurement).
 ///      Supports both EVM and SVM destination routes via RouteType.
 contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
     using SafeERC20 for IERC20;
