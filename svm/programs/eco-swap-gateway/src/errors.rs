@@ -30,8 +30,6 @@ pub enum GatewayError {
     UnsafeMintExtension,
     #[msg("Provided buckets_hash does not match keccak(borsh(buckets)).")]
     BucketsHashMismatch,
-    #[msg("sweep_recipient_token_account must not belong to the program or the Portal.")]
-    InvalidSweepRecipient,
     #[msg("The number of remaining accounts does not match 2 * buckets.len().")]
     InvalidRemainingAccounts,
     #[msg("vault_pda_k at the expected offset does not match the derived PDA.")]
