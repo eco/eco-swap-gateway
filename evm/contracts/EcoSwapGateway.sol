@@ -203,6 +203,9 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
 
     // --- Internal helpers ---
 
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
     /// @dev Pulls `inputAmount` of `inputToken` (or accepts `msg.value` for
     ///      native input), then dispatches `swapCalls` and measures the
     ///      `outputToken` balance delta.

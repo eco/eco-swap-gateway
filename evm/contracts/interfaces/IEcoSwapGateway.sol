@@ -99,6 +99,9 @@ interface IEcoSwapGateway {
     ///      swap that consumes the approval, otherwise the gateway holds open
     ///      attack surface against any subsequent `safeTransferFrom` pull.
     ///      Supports both EVM and SVM destination routes via `RouteType`.
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
     /// @param inputToken      ERC20 token to pull from the caller, or `address(0)`
     ///                        to signal native ETH input (amount is `msg.value`).
     /// @param inputAmount     Amount of inputToken to pull. Must be > 0 for ERC20
@@ -153,6 +156,9 @@ interface IEcoSwapGateway {
     ///      `swapCalls[i].target`. Callers SHOULD append an explicit
     ///      `inputToken.forceApprove(target, 0)` entry to `swapCalls` whenever
     ///      a non-zero residual would otherwise persist past the swap.
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
     /// @param inputToken      ERC20 token to pull from the caller, or `address(0)`
     ///                        to signal native ETH input (amount is `msg.value`).
     /// @param inputAmount     Amount of inputToken to pull. Must be > 0 for ERC20
