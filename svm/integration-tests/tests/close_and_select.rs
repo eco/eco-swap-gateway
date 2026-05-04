@@ -64,7 +64,7 @@ fn run_happy_path(delta: u64, expected_k: usize) {
 
     assert_eq!(ctx.token_balance(&ctx.user_ata()), PRE_BALANCE);
     assert_eq!(ctx.token_balance(&vata), reward_k, "vault receives reward_k");
-    assert_eq!(ctx.token_balance(&ctx.sweep_recipient_ata()), surplus);
+    assert_eq!(ctx.token_balance(&ctx.sweep_recipient_token_account()), surplus);
     assert!(!ctx.account_exists(&ctx.snapshot_pda().0), "snapshot closed");
 }
 
@@ -389,7 +389,7 @@ fn idempotent_over_preexisting_vault_ata() {
 
     assert_eq!(ctx.token_balance(&ctx.user_ata()), PRE_BALANCE);
     assert_eq!(ctx.token_balance(&vata), reward_k);
-    assert_eq!(ctx.token_balance(&ctx.sweep_recipient_ata()), surplus);
+    assert_eq!(ctx.token_balance(&ctx.sweep_recipient_token_account()), surplus);
 
     // Positive control: the token program MUST be invoked for the two
     // `transfer_checked` CPIs (fund + surplus sweep). Asserting this first

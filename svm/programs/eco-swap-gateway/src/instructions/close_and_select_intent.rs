@@ -28,18 +28,19 @@ pub struct CloseAndSelectIntent<'info> {
     /// in the same tx.
     #[account(
         mut,
-        constraint = user_reward_ata.owner == user.key()
+        constraint = user_reward_token_account.owner == user.key()
             @ GatewayError::AtaOwnerMismatch,
-        constraint = user_reward_ata.mint == mint.key()
+        constraint = user_reward_token_account.mint == mint.key()
             @ GatewayError::MintMismatch,
     )]
-    pub user_reward_ata: InterfaceAccount<'info, TokenAccount>,
+    pub user_reward_token_account: InterfaceAccount<'info, TokenAccount>,
 
-    /// Opened by `open`; seeded by `user_reward_ata`. Rent refunds to `user`.
+    /// Opened by `open`; seeded by `user_reward_token_account`. Rent refunds
+    /// to `user`.
     #[account(
         mut,
         close = user,
-        seeds = [SNAPSHOT_SEED, user_reward_ata.key().as_ref()],
+        seeds = [SNAPSHOT_SEED, user_reward_token_account.key().as_ref()],
         bump = snapshot.bump,
     )]
     pub snapshot: Account<'info, SwapSnapshot>,
@@ -47,10 +48,10 @@ pub struct CloseAndSelectIntent<'info> {
     /// Surplus (`delta - reward_amount_k`) recipient. Must share the reward mint.
     #[account(
         mut,
-        constraint = sweep_recipient_ata.mint == mint.key()
+        constraint = sweep_recipient_token_account.mint == mint.key()
             @ GatewayError::MintMismatch,
     )]
-    pub sweep_recipient_ata: InterfaceAccount<'info, TokenAccount>,
+    pub sweep_recipient_token_account: InterfaceAccount<'info, TokenAccount>,
 
     pub mint: InterfaceAccount<'info, Mint>,
 
@@ -88,7 +89,7 @@ pub fn close_and_select_intent<'info>(
     // --- Delta measurement ---
     let delta = ctx
         .accounts
-        .user_reward_ata
+        .user_reward_token_account
         .amount
         .checked_sub(ctx.accounts.snapshot.pre_balance)
         .ok_or(GatewayError::ZeroDelta)?;
@@ -185,7 +186,7 @@ pub fn close_and_select_intent<'info>(
         CpiContext::new(
             token_program_ai.clone(),
             TransferChecked {
-                from: ctx.accounts.user_reward_ata.to_account_info(),
+                from: ctx.accounts.user_reward_token_account.to_account_info(),
                 to: vault_ata_k.to_account_info(),
                 mint: mint_ai.clone(),
                 authority: ctx.accounts.user.to_account_info(),
@@ -202,8 +203,8 @@ pub fn close_and_select_intent<'info>(
             CpiContext::new(
                 token_program_ai,
                 TransferChecked {
-                    from: ctx.accounts.user_reward_ata.to_account_info(),
-                    to: ctx.accounts.sweep_recipient_ata.to_account_info(),
+                    from: ctx.accounts.user_reward_token_account.to_account_info(),
+                    to: ctx.accounts.sweep_recipient_token_account.to_account_info(),
                     mint: mint_ai,
                     authority: ctx.accounts.user.to_account_info(),
                 },

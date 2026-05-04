@@ -12,7 +12,7 @@ pub enum GatewayError {
     InvalidBucketCount,
     #[msg("Reward token mint does not match the provided mint account.")]
     MintMismatch,
-    #[msg("User reward ATA owner does not match the user signer.")]
+    #[msg("User reward token account owner does not match the user signer.")]
     AtaOwnerMismatch,
     #[msg("Reward must have exactly one token entry.")]
     InvalidBaseRewardTokens,
@@ -30,7 +30,7 @@ pub enum GatewayError {
     UnsafeMintExtension,
     #[msg("Provided buckets_hash does not match keccak(borsh(buckets)).")]
     BucketsHashMismatch,
-    #[msg("sweep_recipient_ata must not belong to the program or the Portal.")]
+    #[msg("sweep_recipient_token_account must not belong to the program or the Portal.")]
     InvalidSweepRecipient,
     #[msg("The number of remaining accounts does not match 2 * buckets.len().")]
     InvalidRemainingAccounts,
