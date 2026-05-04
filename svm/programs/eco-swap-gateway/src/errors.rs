@@ -12,7 +12,7 @@ pub enum GatewayError {
     InvalidBucketCount,
     #[msg("Reward token mint does not match the provided mint account.")]
     MintMismatch,
-    #[msg("User reward ATA owner does not match the user signer.")]
+    #[msg("User reward token account owner does not match the user signer.")]
     AtaOwnerMismatch,
     #[msg("Reward must have exactly one token entry.")]
     InvalidBaseRewardTokens,

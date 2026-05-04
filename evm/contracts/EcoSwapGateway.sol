@@ -55,7 +55,7 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         address resolvedSweep = _resolveSweepRecipient(sweepRecipient);
         if (intent.rewardCreator == address(0)) revert InvalidRewardCreator();
         if (intent.rewardProver == address(0)) revert InvalidRewardProver();
-        if (intent.feeDenominator == 0 || intent.feeNumerator == 0 || intent.feeNumerator > intent.feeDenominator) {
+        if (intent.retentionDenominator == 0 || intent.retentionNumerator > intent.retentionDenominator) {
             revert InvalidScalar();
         }
 
@@ -242,9 +242,9 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         pure
         returns (bytes memory route)
     {
-        uint256 afterFees = (swapOutput * intent.feeNumerator) / intent.feeDenominator;
-        if (afterFees <= intent.flatFee) revert RouteAmountZero();
-        uint256 routeAmount = afterFees - intent.flatFee;
+        uint256 retention = (swapOutput * intent.retentionNumerator) / intent.retentionDenominator;
+        if (swapOutput <= retention + intent.flatFee) revert RouteAmountZero();
+        uint256 routeAmount = swapOutput - retention - intent.flatFee;
 
         if (intent.sourceDecimals > intent.destinationDecimals) {
             routeAmount = routeAmount / (10 ** (intent.sourceDecimals - intent.destinationDecimals));
