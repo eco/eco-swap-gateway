@@ -10,7 +10,6 @@ pub struct IntentSelected {
     pub delta: u64,
     pub bucket_index: u64,
     pub reward_amount: u64,
-    pub buckets_hash: Bytes32,
 }
 
 /// Emitted after the selected bucket's reward is transferred into the intent

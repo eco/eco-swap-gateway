@@ -120,10 +120,8 @@ contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
         }
         intentHash = PORTAL.fund{value: nativeValue}(destination, buckets[k].routeHash, reward, true);
 
-        // 6. Emit selection event with bucketsHash for audit.
-        emit IntentSelected(
-            intentHash, msg.sender, swapOutput, k, rewardAmount, keccak256(abi.encode(buckets))
-        );
+        // 6. Emit selection event.
+        emit IntentSelected(intentHash, msg.sender, swapOutput, k, rewardAmount);
 
         // 7. Cleanup: reset approvals, sweep residuals + surplus.
         _cleanup(inputToken, outputToken, resolvedSweep);

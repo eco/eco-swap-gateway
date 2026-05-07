@@ -17,7 +17,6 @@ import {
   Call,
   Reward,
   Route,
-  computeBucketsHash,
   computeIntentHash,
   hashReward,
   hashRoute,
@@ -75,8 +74,6 @@ const REWARD_HASH_HEX =
   "8af572ac3d774567f11617bad36b815333064ad56168e1aec5b1683e7c98bd96";
 const ROUTE_0_HASH_HEX =
   "a3f050c1003e4c3ae7c168bfc06662dd9d6fa05a3056fb4b04d4e3a5db651db7";
-const BUCKETS_HASH_HEX =
-  "5a869aa4443aaca3de7b7f84c3ce53cc35a4882d81f502851a1b9a9cc9817abf";
 const INTENT_HASH_HEX =
   "9a0253853ca6693d5b45e310849ab6697392fb2f076a400abba325c7cfe0e0a7";
 
@@ -86,10 +83,6 @@ function rewardHashMatches() {
 
 function routeHashMatches() {
   assert.equal(toHex(hashRoute(fixtureRoute(100n))), ROUTE_0_HASH_HEX);
-}
-
-function bucketsHashMatches() {
-  assert.equal(toHex(computeBucketsHash(fixtureBuckets())), BUCKETS_HASH_HEX);
 }
 
 function intentHashMatches() {
@@ -107,7 +100,6 @@ function main() {
   const cases: Array<[string, () => void]> = [
     ["reward_hash matches Rust", rewardHashMatches],
     ["route_hash matches Rust", routeHashMatches],
-    ["buckets_hash matches Rust", bucketsHashMatches],
     ["intent_hash matches Rust", intentHashMatches],
   ];
 

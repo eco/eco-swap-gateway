@@ -155,7 +155,6 @@ const CLOSE_AND_SELECT_ARGS_SCHEMA: borsh.Schema = {
     destination: "u64",
     baseReward: REWARD_SCHEMA,
     buckets: { array: { type: BUCKET_SCHEMA } },
-    bucketsHash: { array: { type: "u8", len: 32 } },
   },
 };
 
@@ -224,15 +223,6 @@ export function hashReward(reward: Reward): Uint8Array {
 /** Hash an SVM-native Route. Matches `Route::hash()` in the Rust Portal. */
 export function hashRoute(route: Route): Uint8Array {
   return keccakBytes(encodeRoute(route));
-}
-
-/**
- * `keccak(borsh(Vec<Bucket>))` — the on-chain `keccak_buckets` computes this,
- * and `close_and_select_intent` reverts with `BucketsHashMismatch` if the
- * hash passed in args doesn't equal this computation over the bucket list.
- */
-export function computeBucketsHash(buckets: Bucket[]): Uint8Array {
-  return keccakBytes(encodeBuckets(buckets));
 }
 
 /**
@@ -320,7 +310,6 @@ export function buildCloseAndSelectInstruction(
   vaultPairs: Array<{ vaultPda: PublicKey; vaultAta: PublicKey }>,
 ): TransactionInstruction {
   const [snapshot] = snapshotPda(accounts.userRewardAta);
-  const bucketsHash = computeBucketsHash(args.buckets);
 
   const argsBytes = borsh.serialize(CLOSE_AND_SELECT_ARGS_SCHEMA, {
     destination: args.destination,
@@ -329,7 +318,6 @@ export function buildCloseAndSelectInstruction(
       routeHash: b.routeHash,
       rewardAmount: b.rewardAmount,
     })),
-    bucketsHash,
   });
 
   const data = Buffer.concat([
