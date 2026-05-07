@@ -1,0 +1,27 @@
+[workspace]
+members = ["integration-tests", "programs/*"]
+resolver = "2"
+
+[workspace.dependencies]
+anchor-lang = "0.31.1"
+anchor-spl = "0.31.1"
+derive-new = "0.7.0"
+eco-svm-std = { git = "ssh://git@github.com/eco/eco-routes-svm.git", branch = "fix/portal-mainnet-declare-id" }
+eco-swap-gateway = { path = "programs/eco-swap-gateway" }
+goldie = "0.6.0"
+# Branch `fix/portal-mainnet-declare-id` repoints `portal::ID` from the
+# dev/litesvm value `52gV…` (unchanged on upstream `main`) to the live
+# mainnet Portal `Ecoo5HDM…`. Required for `close_and_select_intent`'s
+# `#[account(address = portal::ID)]` constraint to pass on mainnet.
+portal = { git = "ssh://git@github.com/eco/eco-routes-svm.git", branch = "fix/portal-mainnet-declare-id", features = ["no-entrypoint"] }
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1

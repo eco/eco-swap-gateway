@@ -1,0 +1,29 @@
+[package]
+name = "eco-swap-gateway"
+version = "0.1.0"
+description = "Bucketed swap-and-intent helper for Portal on SVM"
+edition = "2021"
+rust-version = "1.84.0"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "eco_swap_gateway"
+
+[features]
+mainnet = ["portal/mainnet"]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+derive-new = { workspace = true }
+eco-svm-std = { workspace = true }
+portal = { workspace = true }
+
+[dev-dependencies]
+goldie = { workspace = true }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# verifySwapIntent.sh
+# verifyEcoSwapGateway.sh
 #
-# Verifies the deployed SwapIntent contract on block explorers for all chains.
+# Verifies the deployed EcoSwapGateway contract on block explorers for all chains.
 # Reads deployment data from the results CSV and uses chain-specific API keys.
 #
 # Environment variables (from .env):
@@ -25,7 +25,7 @@ source "$SCRIPT_DIR/../lib/eco-routes/scripts/utils/load_chain_data.sh"
 
 if [ ! -f "${RESULTS_FILE:-}" ]; then
     echo "Error: RESULTS_FILE not found at '${RESULTS_FILE:-}'"
-    echo "Run deploySwapIntent.sh first."
+    echo "Run deployEcoSwapGateway.sh first."
     exit 1
 fi
 

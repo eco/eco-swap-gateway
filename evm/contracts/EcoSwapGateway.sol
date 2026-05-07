@@ -1,0 +1,393 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+import {Call, Reward, TokenAmount} from "eco-routes/contracts/types/Intent.sol";
+import {IIntentSource} from "eco-routes/contracts/interfaces/IIntentSource.sol";
+import {Endian} from "eco-routes/contracts/libs/Endian.sol";
+
+import {IEcoSwapGateway, IntentParams, RouteType, Bucket} from "./interfaces/IEcoSwapGateway.sol";
+
+/// @title EcoSwapGateway
+/// @notice Atomically composes a DEX swap with Eco Protocol intent creation.
+///         Exposes two flows:
+///           1. `swapAndCreateIntent` — publish + fund a fresh intent whose
+///              reward equals the full swap output (surplus-free).
+///           2. `swapAndSelectIntent` — fund exactly one of several candidate
+///              intents (buckets). Reward equals the selected bucket's amount
+///              (≤ swap output); surplus is swept to `sweepRecipient`. Funding
+///              is deterministic in `(destination, routeHash, reward)`, so the
+///              selected intent does not need to have been published first.
+/// @dev Does not support fee-on-transfer or rebasing tokens as outputToken
+///      (any token whose balance changes between the post-swap snapshot and
+///      Portal's `transferFrom` will produce an incorrect reward measurement).
+///      Supports both EVM and SVM destination routes via RouteType.
+contract EcoSwapGateway is IEcoSwapGateway, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
+    /// @notice Sentinel value: skip calldata offset patching.
+    uint32 public constant SKIP_CALLDATA_PATCH = type(uint32).max;
+
+    /// @notice The Portal contract used to publish and fund intents.
+    IIntentSource public immutable PORTAL;
+
+    constructor(address _portal) {
+        if (_portal == address(0) || _portal.code.length == 0) {
+            revert InvalidPortal();
+        }
+        PORTAL = IIntentSource(_portal);
+    }
+
+    /// @dev Accepts ETH refunds from DEX routers during multi-hop swaps.
+    receive() external payable {}
+
+    /// @inheritdoc IEcoSwapGateway
+    function swapAndCreateIntent(
+        address inputToken,
+        uint256 inputAmount,
+        address outputToken,
+        Call[] calldata swapCalls,
+        IntentParams calldata intent,
+        address sweepRecipient
+    ) external payable nonReentrant returns (bytes32 intentHash) {
+        // 1. Validate parameters.
+        address resolvedSweep = _resolveSweepRecipient(sweepRecipient);
+        if (intent.rewardCreator == address(0)) revert InvalidRewardCreator();
+        if (intent.rewardProver == address(0)) revert InvalidRewardProver();
+        if (intent.retentionDenominator == 0 || intent.retentionNumerator > intent.retentionDenominator) {
+            revert InvalidScalar();
+        }
+
+        // 2. Pull input tokens and execute swap.
+        uint256 swapOutput = _executeSwap(inputToken, inputAmount, outputToken, swapCalls);
+
+        // 3. Calculate route amount and patch route template.
+        bytes memory route = _buildRoute(swapOutput, intent);
+
+        // 4. Publish and fund intent (reward = full swap output).
+        intentHash = _publishAndFund(outputToken, swapOutput, route, intent);
+
+        // 5. Emit event.
+        emit IntentCreated(intentHash, msg.sender, swapOutput);
+
+        // 6. Cleanup: reset approvals, sweep residual tokens and ETH.
+        _cleanup(inputToken, outputToken, resolvedSweep);
+    }
+
+    function _resolveSweepRecipient(address sweepRecipient) internal view returns (address resolved) {
+        resolved = sweepRecipient == address(0) ? msg.sender : sweepRecipient;
+        if (resolved == address(this) || resolved == address(PORTAL)) {
+            revert InvalidSweepRecipient();
+        }
+    }
+
+    /// @inheritdoc IEcoSwapGateway
+    function swapAndSelectIntent(
+        address inputToken,
+        uint256 inputAmount,
+        address outputToken,
+        Call[] calldata swapCalls,
+        uint64 destination,
+        Reward calldata baseReward,
+        Bucket[] calldata buckets,
+        address sweepRecipient
+    ) external payable nonReentrant returns (bytes32 intentHash) {
+        // 1. Validate parameters that don't depend on swapOutput — fail *before*
+        //    the swap so a malformed call doesn't eat DEX slippage.
+        address resolvedSweep = _resolveSweepRecipient(sweepRecipient);
+        _validateBaseReward(baseReward, outputToken);
+        _validateBucketsAscending(buckets);
+
+        // 2. Pull input tokens and execute swap.
+        uint256 swapOutput = _executeSwap(inputToken, inputAmount, outputToken, swapCalls);
+
+        // 3. Floor-select the bucket for the actual swap output.
+        uint256 k = _findBucketFloor(buckets, swapOutput);
+        uint256 rewardAmount = buckets[k].rewardAmount;
+
+        // 4. Clone the reward template with the bucket's amount.
+        Reward memory reward = _cloneRewardWithAmount(baseReward, outputToken, rewardAmount);
+
+        // 5. Fund the selected intent (allowPartial=true → front-run funding is a no-op).
+        uint256 nativeValue;
+        if (outputToken == address(0)) {
+            nativeValue = rewardAmount;
+        } else {
+            IERC20(outputToken).forceApprove(address(PORTAL), rewardAmount);
+        }
+        intentHash = PORTAL.fund{value: nativeValue}(destination, buckets[k].routeHash, reward, true);
+
+        // 6. Emit selection event.
+        emit IntentSelected(intentHash, msg.sender, swapOutput, k, rewardAmount);
+
+        // 7. Cleanup: reset approvals, sweep residuals + surplus.
+        _cleanup(inputToken, outputToken, resolvedSweep);
+    }
+
+    function _validateBaseReward(Reward calldata baseReward, address outputToken) internal pure {
+        if (baseReward.creator == address(0)) revert InvalidRewardCreator();
+        if (baseReward.prover == address(0)) revert InvalidRewardProver();
+        if (outputToken == address(0)) {
+            // Native ETH reward: placeholder is nativeAmount; tokens[] must be empty.
+            if (baseReward.tokens.length != 0) revert RewardMustHaveNoTokens();
+            if (baseReward.nativeAmount != 0) revert RewardPlaceholderAmountNotZero();
+        } else {
+            if (baseReward.nativeAmount != 0) revert RewardNativeAmountNotZero();
+            if (baseReward.tokens.length != 1) revert RewardMustHaveOneToken();
+            if (baseReward.tokens[0].token != outputToken) revert RewardTokenMismatch();
+            if (baseReward.tokens[0].amount != 0) revert RewardPlaceholderAmountNotZero();
+        }
+    }
+
+    /// @dev Validates non-empty + strictly ascending. Safe to call pre-swap
+    ///      because neither property depends on swapOutput.
+    function _validateBucketsAscending(Bucket[] calldata buckets) internal pure {
+        uint256 n = buckets.length;
+        if (n == 0) revert EmptyBuckets();
+        uint256 prev = buckets[0].rewardAmount;
+        for (uint256 i = 1; i < n; ++i) {
+            uint256 current = buckets[i].rewardAmount;
+            if (current <= prev) revert BucketsNotAscending();
+            prev = current;
+        }
+    }
+
+    /// @dev Picks the largest index whose `rewardAmount <= swapOutput`. Assumes
+    ///      `_validateBucketsAscending` has already run (buckets are sorted and
+    ///      non-empty). Short-circuits once a bucket exceeds swapOutput. If
+    ///      swapOutput exceeds the top bucket, selection caps at `N - 1`
+    ///      (surplus falls to `sweepRecipient`).
+    function _findBucketFloor(Bucket[] calldata buckets, uint256 swapOutput)
+        internal
+        pure
+        returns (uint256 k)
+    {
+        if (swapOutput < buckets[0].rewardAmount) revert SwapOutputBelowMinBucket();
+        uint256 n = buckets.length;
+        for (uint256 i = 1; i < n; ++i) {
+            if (buckets[i].rewardAmount > swapOutput) break;
+            k = i;
+        }
+    }
+
+    /// @dev Clone the base reward template with `amount` filled into either the
+    ///      native slot (if `outputToken == address(0)`) or the single-token slot.
+    function _cloneRewardWithAmount(Reward calldata baseReward, address outputToken, uint256 amount)
+        internal
+        pure
+        returns (Reward memory reward)
+    {
+        if (outputToken == address(0)) {
+            reward = Reward({
+                deadline: baseReward.deadline,
+                creator: baseReward.creator,
+                prover: baseReward.prover,
+                nativeAmount: amount,
+                tokens: new TokenAmount[](0)
+            });
+        } else {
+            TokenAmount[] memory tokens = new TokenAmount[](1);
+            tokens[0] = TokenAmount({token: baseReward.tokens[0].token, amount: amount});
+            reward = Reward({
+                deadline: baseReward.deadline,
+                creator: baseReward.creator,
+                prover: baseReward.prover,
+                nativeAmount: 0,
+                tokens: tokens
+            });
+        }
+    }
+
+    // --- Internal helpers ---
+
+    /// @dev WARNING: `swapCalls` are caller-supplied and arbitrary; the only on-chain
+    ///      enforcement is `swapOutput > 0`. Callers and SDKs must inspect every target
+    ///      and selector before signing — blind-signing this payload is unsafe.
+    /// @dev Pulls `inputAmount` of `inputToken` (or accepts `msg.value` for
+    ///      native input), then dispatches `swapCalls` and measures the
+    ///      `outputToken` balance delta.
+    ///
+    ///      Residual-allowance behaviour: `swapCalls` are caller-supplied and
+    ///      typically include one or more `inputToken.approve(target, x)`
+    ///      calls so the DEX can pull tokens via `transferFrom`. Neither this
+    ///      function nor `_cleanup` revokes any of those allowances —
+    ///      `_cleanup` only sweeps residual ERC-20 balances and ETH. Whatever
+    ///      `inputToken` allowance remains on each `swapCalls[i].target` at
+    ///      the end of this call persists across the transaction.
+    ///
+    ///      On the happy path (e.g. `forceApprove(target, exactAmount)` plus
+    ///      a matching `transferFrom`) the residual is zero, but callers
+    ///      cannot rely on that for arbitrary `swapCalls`: any over-approval,
+    ///      `type(uint256).max` allowance, or skipped pull leaves a non-zero
+    ///      allowance on `target`. The exposure window is bounded — it
+    ///      starts when `safeTransferFrom` pulls `inputToken` from the user
+    ///      and ends when the swap consumes those tokens — but a buggy or
+    ///      malicious `target` could drain whatever the gateway holds at
+    ///      that moment. Callers leaving residual allowances SHOULD include
+    ///      explicit `inputToken.forceApprove(target, 0)` entries inside
+    ///      `swapCalls` after the swap step that consumes the approval.
+    function _executeSwap(
+        address inputToken,
+        uint256 inputAmount,
+        address outputToken,
+        Call[] calldata swapCalls
+    ) internal returns (uint256 swapOutput) {
+        if (inputToken == address(0)) {
+            // Native ETH input — amount is msg.value; nothing to pull.
+            if (msg.value == 0) revert InvalidInputAmount();
+        } else {
+            if (inputAmount == 0) revert InvalidInputAmount();
+            IERC20(inputToken).safeTransferFrom(msg.sender, address(this), inputAmount);
+        }
+
+        uint256 preBalance = _outputBalance(outputToken);
+
+        for (uint256 i; i < swapCalls.length; ++i) {
+            (bool success, bytes memory returnData) =
+                swapCalls[i].target.call{value: swapCalls[i].value}(swapCalls[i].data);
+            if (!success) revert CallFailed(i, returnData);
+        }
+
+        swapOutput = _outputBalance(outputToken) - preBalance;
+        if (swapOutput == 0) revert InsufficientSwapOutput();
+    }
+
+    /// @dev Balance of `outputToken` held by this contract. `address(0)` signals
+    ///      native ETH, in which case this returns `address(this).balance`.
+    function _outputBalance(address outputToken) internal view returns (uint256) {
+        return outputToken == address(0)
+            ? address(this).balance
+            : IERC20(outputToken).balanceOf(address(this));
+    }
+
+    function _buildRoute(uint256 swapOutput, IntentParams calldata intent)
+        internal
+        pure
+        returns (bytes memory route)
+    {
+        uint256 retention = (swapOutput * intent.retentionNumerator) / intent.retentionDenominator;
+        if (swapOutput <= retention + intent.flatFee) revert RouteAmountZero();
+        uint256 routeAmount = swapOutput - retention - intent.flatFee;
+
+        if (intent.sourceDecimals > intent.destinationDecimals) {
+            routeAmount = routeAmount / (10 ** (intent.sourceDecimals - intent.destinationDecimals));
+        } else if (intent.destinationDecimals > intent.sourceDecimals) {
+            routeAmount = routeAmount * (10 ** (intent.destinationDecimals - intent.sourceDecimals));
+        }
+        if (routeAmount == 0) revert RouteAmountZero();
+
+        route = _patchRoute(
+            intent.routeTemplate, intent.tokensAmountOffset, intent.calldataAmountOffset, routeAmount, intent.routeType
+        );
+    }
+
+    function _publishAndFund(
+        address outputToken,
+        uint256 swapOutput,
+        bytes memory route,
+        IntentParams calldata intent
+    ) internal returns (bytes32 intentHash) {
+        Reward memory reward;
+        uint256 nativeValue;
+        if (outputToken == address(0)) {
+            // Native ETH reward: carried in `reward.nativeAmount` + msg.value.
+            reward = Reward({
+                deadline: intent.rewardDeadline,
+                creator: intent.rewardCreator,
+                prover: intent.rewardProver,
+                nativeAmount: swapOutput,
+                tokens: new TokenAmount[](0)
+            });
+            nativeValue = swapOutput;
+        } else {
+            TokenAmount[] memory tokens = new TokenAmount[](1);
+            tokens[0] = TokenAmount({token: outputToken, amount: swapOutput});
+            reward = Reward({
+                deadline: intent.rewardDeadline,
+                creator: intent.rewardCreator,
+                prover: intent.rewardProver,
+                nativeAmount: 0,
+                tokens: tokens
+            });
+            IERC20(outputToken).forceApprove(address(PORTAL), swapOutput);
+        }
+
+        (intentHash,) = PORTAL.publishAndFund{value: nativeValue}(
+            intent.destination, route, reward, intent.allowPartial
+        );
+    }
+
+    function _patchRoute(
+        bytes calldata template,
+        uint32 tokensOffset,
+        uint32 calldataOffset,
+        uint256 value,
+        RouteType routeType
+    ) internal pure returns (bytes memory route) {
+        route = bytes(template);
+        if (routeType == RouteType.SVM) {
+            _patchU64LE(route, tokensOffset, value);
+            if (calldataOffset != SKIP_CALLDATA_PATCH) {
+                _patchU64LE(route, calldataOffset, value);
+            }
+        } else {
+            _patchUint256(route, tokensOffset, value);
+            if (calldataOffset != SKIP_CALLDATA_PATCH) {
+                _patchUint256(route, calldataOffset, value);
+            }
+        }
+    }
+
+    function _patchUint256(bytes memory data, uint32 offset, uint256 value) internal pure {
+        if (uint256(offset) + 32 > data.length) revert OffsetOutOfBounds();
+        assembly {
+            mstore(add(add(data, 0x20), offset), value)
+        }
+    }
+
+    function _patchU64LE(bytes memory data, uint32 offset, uint256 value) internal pure {
+        if (value > type(uint64).max) revert AmountOverflowU64();
+        if (uint256(offset) + 8 > data.length) revert OffsetOutOfBounds();
+        bytes8 leValue = Endian.toLittleEndian64(uint64(value));
+        for (uint256 i; i < 8; ++i) {
+            data[offset + i] = leValue[i];
+        }
+    }
+
+    /// @dev Shared post-intent cleanup for F1 and F2: sweep residual input/output
+    ///      token balances and any leftover ETH to `to`. This function does
+    ///      NOT revoke any ERC-20 allowances — neither the `outputToken`
+    ///      allowance granted to `PORTAL` (left at its natural
+    ///      post-consumption value of 0 because `forceApprove` matches the
+    ///      exact amount Portal pulls) nor the `inputToken` allowances
+    ///      granted by `swapCalls` to each `swapCalls[i].target`. Any
+    ///      residual DEX allowance therefore persists across the transaction.
+    ///      See `_executeSwap` for the full residual-allowance contract and
+    ///      the recommended caller-side mitigation
+    ///      (`inputToken.forceApprove(target, 0)` inside `swapCalls`).
+    function _cleanup(address inputToken, address outputToken, address to) internal {
+        // address(0) signals native ETH — no ERC20 to sweep on that side;
+        // leftover ETH (surplus + refunds) is swept by _sweepETH below.
+        if (inputToken != address(0)) _sweepToken(inputToken, to);
+        if (outputToken != address(0)) _sweepToken(outputToken, to);
+        _sweepETH(to);
+    }
+
+    function _sweepToken(address token, address to) internal {
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        if (balance > 0) {
+            IERC20(token).safeTransfer(to, balance);
+        }
+    }
+
+    function _sweepETH(address to) internal {
+        uint256 balance = address(this).balance;
+        if (balance > 0) {
+            (bool ok,) = to.call{value: balance}("");
+            if (!ok) revert NativeTransferFailed();
+        }
+    }
+}
