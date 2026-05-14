@@ -1069,7 +1069,7 @@ checksum = "abe71d579d1812060163dff96056261deb5bf6729b100fa2e36a68b9649ba3d3"
 [[package]]
 name = "eco-svm-std"
 version = "0.1.0"
-source = "git+ssh://git@github.com/eco/eco-routes-svm.git?branch=fix%2Fportal-mainnet-declare-id#fafd337c44211c4bd80a9def495335b43419b85b"
+source = "git+https://github.com/eco/eco-routes-svm.git?branch=main#eff58e197f79847d573da95f90c9c9b4c988e49d"
 dependencies = [
  "anchor-lang",
  "derive-new",
@@ -2253,7 +2253,7 @@ dependencies = [
 [[package]]
 name = "portal"
 version = "0.1.0"
-source = "git+ssh://git@github.com/eco/eco-routes-svm.git?branch=fix%2Fportal-mainnet-declare-id#fafd337c44211c4bd80a9def495335b43419b85b"
+source = "git+https://github.com/eco/eco-routes-svm.git?branch=main#eff58e197f79847d573da95f90c9c9b4c988e49d"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
