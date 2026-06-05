@@ -6,10 +6,10 @@ resolver = "2"
 anchor-lang = "0.31.1"
 anchor-spl = "0.31.1"
 derive-new = "0.7.0"
-eco-svm-std = { git = "https://github.com/eco/eco-routes-svm.git", tag = "v1.0.1" }
+eco-svm-std = { git = "https://github.com/eco/eco-routes-svm.git", tag = "v1.0.4" }
 eco-swap-gateway = { path = "programs/eco-swap-gateway" }
 goldie = "0.6.0"
-portal = { git = "https://github.com/eco/eco-routes-svm.git", tag = "v1.0.1", features = ["no-entrypoint"] }
+portal = { git = "https://github.com/eco/eco-routes-svm.git", tag = "v1.0.4", features = ["no-entrypoint"] }
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 
 [profile.release]
