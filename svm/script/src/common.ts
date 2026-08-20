@@ -26,21 +26,19 @@ import { keccak_256 } from "@noble/hashes/sha3";
 // ── Program constants ─────────────────────────────────────────────────────
 
 export const PORTAL_PROGRAM_ID = new PublicKey(
-  "Ecoo5HDM2XCBy7QzkhDGrAmnRcWw7emU6xGr7CcCmooo",
+  "EcooswwC1NggsckZyF5SeAL9WsgJs3UhPbrqY1apV73F",
 );
 
 export const ECO_SWAP_GATEWAY_PROGRAM_ID = new PublicKey(
-  "EcoS9WNe7onaxkS9STYMHhUKsvjQGte1eitKhXCpvSPi",
+  "EcoSEtxisQpF6BcSVkQBk1AYdM1H41j95t28JiFE7aQB",
 );
 
 export const FLASH_FULFILLER_PROGRAM_ID = new PublicKey(
-  "EcoFvY9tDz6kaxAQxNHga68sQm535DskDBCgKm3tziaT",
+  "EcoFiZiPRTZzcQhHHUZqL9VGMjzYWvfQbDgJwaNsSXbQ",
 );
 
-/// Mainnet deployment — differs from `local_prover`'s `declare_id!` in its
-/// crate source, which reflects the devnet / `no-mainnet-feature` build.
 export const LOCAL_PROVER_PROGRAM_ID = new PublicKey(
-  "EcoPZL6PoZ5zHUUpmJLfux1jw126W7jhBB8zrVaFaK1y",
+  "EcoLE4mTBSCZ4BwyxfBrCvX8tBRAXEyd1UfurM1CKDdV",
 );
 
 /// Matches `eco_svm_std::CHAIN_ID` under the `mainnet` feature.

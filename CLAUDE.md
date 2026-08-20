@@ -87,7 +87,7 @@ anchor deploy
 - **Surplus sweep**: defaults to `msg.sender` when the caller passes `address(0)` as `sweepRecipient`.
 - **Same salt across all buckets**: hash uniqueness comes from varying `tokens[0].amount` in both the Route and Reward.
 - **EVM version**: Paris (`evm_version = "paris"` in `evm/foundry.toml`), Solidity 0.8.27, via-IR enabled.
-- **Anchor version**: 0.31.1; program ID `EcoSKGQcT8FD5WyAAN9txJXMWQnvdy4SZZrUTNafLD7F` on localnet, devnet, and mainnet.
+- **Anchor version**: 0.31.1; program ID `EcoSEtxisQpF6BcSVkQBk1AYdM1H41j95t28JiFE7aQB` on localnet, devnet, and mainnet.
 
 ## Key Environment Variables
 

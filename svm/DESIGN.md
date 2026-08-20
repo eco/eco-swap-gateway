@@ -232,7 +232,7 @@ Accounts (static):
 - `snapshot: PDA(close = user, seeds = ["snap", user_reward_ata])` — Anchor refunds rent on close
 - `sweep_recipient_ata: TokenAccount(mut)` — where `delta − reward_amount_k` lands (must be pre-initialized)
 - `mint: InterfaceAccount<Mint>` — reward token mint; SPL Token or Token-2022. If Token-2022, mint extensions are checked against an allow-list (see "Mint safety" below).
-- `portal_program: Program` — compile-time-pinned ID `Ecoo5HDM2XCBy7QzkhDGrAmnRcWw7emU6xGr7CcCmooo`
+- `portal_program: Program` — compile-time-pinned ID `EcooswwC1NggsckZyF5SeAL9WsgJs3UhPbrqY1apV73F`
 - `token_program: Program<Token>`, `token_2022_program: Program<Token2022>`, `associated_token_program`, `system_program`
 
 Accounts (remaining, outer ix, ordered by `k ∈ [0, N)`):
