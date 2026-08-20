@@ -52,7 +52,7 @@ export const SWAP_ROUTER_02_BASE: Address =
 export const QUOTER_V2_BASE: Address =
   "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a";
 export const PORTAL_BASE: Address =
-  "0x399Dbd5DF04f83103F77A58cBa2B7c4d3cdede97";
+  "0xEC000064576f9C95a8623Bc0eff3db6d296ea6df";
 // Memecoin pools settle on the HIGH fee tier on Base. MEDIUM for USDC/TOSHI
 // is a dust pool and severely misprices.
 export const USDC_TOSHI_FEE: FeeAmount = v3Sdk.FeeAmount.HIGH; // 10000
@@ -80,10 +80,10 @@ export const TOSHI_TOKEN: Token = new sdkCore.Token(
 // through the Base HyperProver.
 
 export const SVM_HYPER_PROVER = new PublicKey(
-  "EcooFDTfKVVo5qZcpNoDngMmVXqrG6FQT1D5LDjZEGeR",
+  "EcoHgBEV6nVQttvDZF6y3k6t481GLHaigae5KXo4JUY9",
 );
 export const BASE_HYPER_PROVER: Address =
-  "0xC972B26C1E208845Ca8C18c6B83466bFCeED8c2F";
+  "0xec004ab4870c4e177c66949329dcdb503ce41022";
 
 // HyperProver uses chain-id-as-domain-id (solver's `hyper.prover.ts:43-45`).
 export const SOLANA_HYPERLANE_DOMAIN = CHAIN_ID_SOLANA; // 1399811149n
