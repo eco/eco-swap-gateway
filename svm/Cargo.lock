@@ -1003,27 +1003,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_more"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
-dependencies = [
- "derive_more-impl",
-]
-
-[[package]]
-name = "derive_more-impl"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
-dependencies = [
- "proc-macro2",
- "quote",
- "rustc_version",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1069,11 +1048,10 @@ checksum = "abe71d579d1812060163dff96056261deb5bf6729b100fa2e36a68b9649ba3d3"
 [[package]]
 name = "eco-svm-std"
 version = "0.1.0"
-source = "git+https://github.com/eco/eco-routes-svm.git?tag=v1.0.6#5aa308c6386edc1e92413c30b35958023a003215"
+source = "git+https://github.com/eco/eco-routes-svm.git?tag=v2.0.0#3bace91f32a3e1c0dfb715992ac0ce8165bed67b"
 dependencies = [
  "anchor-lang",
  "derive-new",
- "derive_more",
 ]
 
 [[package]]
@@ -2253,7 +2231,7 @@ dependencies = [
 [[package]]
 name = "portal"
 version = "0.1.0"
-source = "git+https://github.com/eco/eco-routes-svm.git?tag=v1.0.6#5aa308c6386edc1e92413c30b35958023a003215"
+source = "git+https://github.com/eco/eco-routes-svm.git?tag=v2.0.0#3bace91f32a3e1c0dfb715992ac0ce8165bed67b"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
