@@ -100,10 +100,7 @@ pub fn close_and_select_intent<'info>(
     let mut k: usize = 0;
     let mut prev = buckets[0].reward_amount;
     for (i, b) in buckets.iter().enumerate().skip(1) {
-        require!(
-            b.reward_amount > prev,
-            GatewayError::BucketsNotAscending
-        );
+        require!(b.reward_amount > prev, GatewayError::BucketsNotAscending);
         if b.reward_amount <= delta {
             k = i;
         }

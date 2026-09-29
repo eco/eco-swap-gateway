@@ -48,8 +48,10 @@ impl Context {
         let mint_authority = Keypair::new();
 
         svm.airdrop(&user.pubkey(), 10_000_000_000).unwrap();
-        svm.airdrop(&sweep_recipient.pubkey(), 1_000_000_000).unwrap();
-        svm.airdrop(&mint_authority.pubkey(), 10_000_000_000).unwrap();
+        svm.airdrop(&sweep_recipient.pubkey(), 1_000_000_000)
+            .unwrap();
+        svm.airdrop(&mint_authority.pubkey(), 10_000_000_000)
+            .unwrap();
 
         // Mint + two ATAs.
         let mint = Keypair::new();
@@ -113,10 +115,7 @@ impl Context {
     }
 
     pub fn snapshot_pda(&self) -> (Pubkey, u8) {
-        Pubkey::find_program_address(
-            &[b"snap", self.user_ata().as_ref()],
-            &eco_swap_gateway::ID,
-        )
+        Pubkey::find_program_address(&[b"snap", self.user_ata().as_ref()], &eco_swap_gateway::ID)
     }
 
     pub fn token_balance(&self, ata: &Pubkey) -> u64 {
@@ -128,7 +127,10 @@ impl Context {
     }
 
     pub fn account_exists(&self, pk: &Pubkey) -> bool {
-        self.svm.get_account(pk).map(|a| a.lamports > 0).unwrap_or(false)
+        self.svm
+            .get_account(pk)
+            .map(|a| a.lamports > 0)
+            .unwrap_or(false)
     }
 
     // ── Mint / swap simulation ───────────────────────────────────────
@@ -262,7 +264,9 @@ impl Context {
     }
 
     pub fn unix_now(&self) -> u64 {
-        self.svm.get_sysvar::<solana_sdk::clock::Clock>().unix_timestamp as u64
+        self.svm
+            .get_sysvar::<solana_sdk::clock::Clock>()
+            .unix_timestamp as u64
     }
 }
 

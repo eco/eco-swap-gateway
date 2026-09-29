@@ -63,12 +63,9 @@ fn hex(b: &Bytes32) -> String {
 // Regenerate by running the `print_goldens` test with `--nocapture` when any
 // encoder changes, then update the TS side at `svm/script/src/hashParity.test.ts`.
 
-const REWARD_HASH_HEX: &str =
-    "8af572ac3d774567f11617bad36b815333064ad56168e1aec5b1683e7c98bd96";
-const ROUTE_0_HASH_HEX: &str =
-    "a3f050c1003e4c3ae7c168bfc06662dd9d6fa05a3056fb4b04d4e3a5db651db7";
-const INTENT_HASH_HEX: &str =
-    "9a0253853ca6693d5b45e310849ab6697392fb2f076a400abba325c7cfe0e0a7";
+const REWARD_HASH_HEX: &str = "8af572ac3d774567f11617bad36b815333064ad56168e1aec5b1683e7c98bd96";
+const ROUTE_0_HASH_HEX: &str = "a3f050c1003e4c3ae7c168bfc06662dd9d6fa05a3056fb4b04d4e3a5db651db7";
+const INTENT_HASH_HEX: &str = "9a0253853ca6693d5b45e310849ab6697392fb2f076a400abba325c7cfe0e0a7";
 
 #[test]
 #[ignore]
@@ -76,11 +73,7 @@ fn print_goldens() {
     let reward = fixture_reward();
     let route0 = fixture_route(100);
     let buckets = fixture_buckets();
-    let intent_hash = compute_intent_hash(
-        DESTINATION,
-        &buckets[0].route_hash,
-        &reward.hash(),
-    );
+    let intent_hash = compute_intent_hash(DESTINATION, &buckets[0].route_hash, &reward.hash());
 
     println!("reward_hash:  0x{}", hex(&reward.hash()));
     println!("route_0_hash: 0x{}", hex(&route0.hash()));
