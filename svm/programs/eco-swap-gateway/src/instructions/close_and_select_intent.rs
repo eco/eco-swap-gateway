@@ -61,7 +61,7 @@ pub struct CloseAndSelectIntent<'info> {
 }
 
 pub fn close_and_select_intent<'info>(
-    ctx: Context<'_, '_, '_, 'info, CloseAndSelectIntent<'info>>,
+    ctx: Context<'info, CloseAndSelectIntent<'info>>,
     args: CloseAndSelectArgs,
 ) -> Result<()> {
     let CloseAndSelectArgs {
@@ -160,7 +160,7 @@ pub fn close_and_select_intent<'info>(
 
     if vault_ata_k.data_is_empty() {
         associated_token::create(CpiContext::new(
-            ctx.accounts.associated_token_program.to_account_info(),
+            ctx.accounts.associated_token_program.key(),
             Create {
                 payer: ctx.accounts.user.to_account_info(),
                 associated_token: vault_ata_k.to_account_info(),
@@ -174,7 +174,7 @@ pub fn close_and_select_intent<'info>(
 
     transfer_checked(
         CpiContext::new(
-            token_program_ai.clone(),
+            token_program_id,
             TransferChecked {
                 from: ctx.accounts.user_reward_token_account.to_account_info(),
                 to: vault_ata_k.to_account_info(),
@@ -191,7 +191,7 @@ pub fn close_and_select_intent<'info>(
     if surplus > 0 {
         transfer_checked(
             CpiContext::new(
-                token_program_ai,
+                token_program_id,
                 TransferChecked {
                     from: ctx.accounts.user_reward_token_account.to_account_info(),
                     to: ctx.accounts.sweep_recipient_token_account.to_account_info(),

@@ -32,7 +32,7 @@ fn fixture_route(amount: u64) -> Route {
         native_amount: 0,
         tokens: vec![TokenAmount {
             token: Pubkey::new_from_array([1u8; 32]),
-            amount: amount,
+            amount,
         }],
         calls: vec![Call {
             target: [6u8; 32].into(),

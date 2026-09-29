@@ -1,4 +1,5 @@
-use anchor_lang::AnchorSerialize;
+use anchor_lang::prelude::borsh;
+use anchor_lang::system_program;
 use anchor_spl::associated_token::{
     get_associated_token_address,
     spl_associated_token_account::instruction::create_associated_token_account,
@@ -9,7 +10,7 @@ use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
 use litesvm::LiteSVM;
 use portal::state::vault_pda;
 use portal::types::{intent_hash as compute_intent_hash, Reward, TokenAmount};
-use solana_sdk::compute_budget::ComputeBudgetInstruction;
+use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::message::Message;
 use solana_sdk::program_pack::Pack;
@@ -17,7 +18,6 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::rent::Rent;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
-use solana_sdk::system_program;
 use solana_sdk::transaction::Transaction;
 
 use eco_swap_gateway::types::{Bucket, CloseAndSelectArgs};
@@ -40,8 +40,8 @@ pub struct Context {
 impl Context {
     pub fn new() -> Self {
         let mut svm = LiteSVM::new();
-        svm.add_program(portal::ID, PORTAL_BIN);
-        svm.add_program(eco_swap_gateway::ID, GATEWAY_BIN);
+        svm.add_program(portal::ID, PORTAL_BIN).unwrap();
+        svm.add_program(eco_swap_gateway::ID, GATEWAY_BIN).unwrap();
 
         let user = Keypair::new();
         let sweep_recipient = Keypair::new();
@@ -55,7 +55,7 @@ impl Context {
         let mint = Keypair::new();
         let mint_pk = mint.pubkey();
         let rent = svm.get_sysvar::<Rent>();
-        let create_mint = solana_sdk::system_instruction::create_account(
+        let create_mint = anchor_lang::solana_program::system_instruction::create_account(
             &mint_authority.pubkey(),
             &mint_pk,
             rent.minimum_balance(spl_token::state::Mint::LEN),
@@ -225,7 +225,7 @@ impl Context {
     ) -> Instruction {
         let (snapshot, _) = self.snapshot_pda();
         let mut data = anchor_discriminator("close_and_select_intent");
-        data.extend_from_slice(&args.try_to_vec().unwrap());
+        data.extend_from_slice(&borsh::to_vec(&args).unwrap());
 
         let mut metas = vec![
             AccountMeta::new(self.user.pubkey(), true),

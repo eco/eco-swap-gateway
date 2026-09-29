@@ -87,7 +87,7 @@ anchor deploy
 - **Surplus sweep**: defaults to `msg.sender` when the caller passes `address(0)` as `sweepRecipient`.
 - **Same salt across all buckets**: hash uniqueness comes from varying `tokens[0].amount` in both the Route and Reward.
 - **EVM version**: Paris (`evm_version = "paris"` in `evm/foundry.toml`), Solidity 0.8.27, via-IR enabled.
-- **Anchor version**: 0.31.1; program ID `EcoSEtxisQpF6BcSVkQBk1AYdM1H41j95t28JiFE7aQB` on localnet, devnet, and mainnet.
+- **Anchor version**: 1.1.2 (host Rust 1.97.1; on-chain code compiles with platform-tools v1.52, pinned by `[package.metadata.solana]` in the program's `Cargo.toml`); program ID `EcoSZwpd4VnXXqfBHc4xBDzvidSRsNTPW744hs62hvWS` on localnet, devnet, and mainnet. Depends on `portal` and `eco-svm-std` from `eco-routes-svm` pinned by git rev (portal ID `EcoowmRRrMyYtQCuh5fCvMDWcD6B9ZDZkpgedf2bWKXi`).
 
 ## Key Environment Variables
 

@@ -1,18 +1,18 @@
 [toolchain]
-anchor_version = "0.31.1"
+anchor_version = "1.1.2"
 
 [features]
 resolution = true
 skip-lint = false
 
 [programs.localnet]
-eco_swap_gateway = "EcoSEtxisQpF6BcSVkQBk1AYdM1H41j95t28JiFE7aQB"
+eco_swap_gateway = "EcoSZwpd4VnXXqfBHc4xBDzvidSRsNTPW744hs62hvWS"
 
 [programs.devnet]
-eco_swap_gateway = "EcoSEtxisQpF6BcSVkQBk1AYdM1H41j95t28JiFE7aQB"
+eco_swap_gateway = "EcoSZwpd4VnXXqfBHc4xBDzvidSRsNTPW744hs62hvWS"
 
 [programs.mainnet]
-eco_swap_gateway = "EcoSEtxisQpF6BcSVkQBk1AYdM1H41j95t28JiFE7aQB"
+eco_swap_gateway = "EcoSZwpd4VnXXqfBHc4xBDzvidSRsNTPW744hs62hvWS"
 
 [registry]
 url = "https://api.apr.dev"
