@@ -3,13 +3,13 @@ members = ["integration-tests", "programs/*"]
 resolver = "2"
 
 [workspace.dependencies]
-anchor-lang = "0.31.1"
-anchor-spl = "0.31.1"
+anchor-lang = "1.1.2"
+anchor-spl = "1.1.2"
 derive-new = "0.7.0"
-eco-svm-std = { git = "https://github.com/eco/eco-routes-svm.git", tag = "v2.0.0" }
+eco-svm-std = { git = "https://github.com/eco/eco-routes-svm.git", rev = "aa8059ee67ac116d47693ec83926078276c083f7" }
 eco-swap-gateway = { path = "programs/eco-swap-gateway" }
 goldie = "0.6.0"
-portal = { git = "https://github.com/eco/eco-routes-svm.git", tag = "v2.0.0", features = ["no-entrypoint"] }
+portal = { git = "https://github.com/eco/eco-routes-svm.git", rev = "aa8059ee67ac116d47693ec83926078276c083f7", features = ["no-entrypoint"] }
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 
 [profile.release]

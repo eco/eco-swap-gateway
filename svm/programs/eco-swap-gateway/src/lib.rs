@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("EcoSEtxisQpF6BcSVkQBk1AYdM1H41j95t28JiFE7aQB");
+declare_id!("EcoSZwpd4VnXXqfBHc4xBDzvidSRsNTPW744hs62hvWS");
 
 pub mod errors;
 pub mod events;
@@ -28,7 +28,7 @@ pub mod eco_swap_gateway {
     /// `IntentSelected` + `IntentFunded`. No Portal CPI — lets this ix
     /// run nested under `portal::fulfill` without tripping reentrancy.
     pub fn close_and_select_intent<'info>(
-        ctx: Context<'_, '_, '_, 'info, CloseAndSelectIntent<'info>>,
+        ctx: Context<'info, CloseAndSelectIntent<'info>>,
         args: CloseAndSelectArgs,
     ) -> Result<()> {
         instructions::close_and_select_intent(ctx, args)

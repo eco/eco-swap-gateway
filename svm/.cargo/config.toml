@@ -1,2 +1,5 @@
+[build]
+rustflags = ["-A", "unexpected_cfgs"]
+
 [net]
 git-fetch-with-cli = true

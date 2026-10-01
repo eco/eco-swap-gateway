@@ -56,12 +56,23 @@ fn run_happy_path(delta: u64, expected_k: usize) {
 
     let reward_k = buckets[expected_k].reward_amount;
     let surplus = delta - reward_k;
-    let (_, _, vata) = ctx.vault_accounts_for_bucket(DESTINATION, &buckets[expected_k], &base_reward);
+    let (_, _, vata) =
+        ctx.vault_accounts_for_bucket(DESTINATION, &buckets[expected_k], &base_reward);
 
     assert_eq!(ctx.token_balance(&ctx.user_ata()), PRE_BALANCE);
-    assert_eq!(ctx.token_balance(&vata), reward_k, "vault receives reward_k");
-    assert_eq!(ctx.token_balance(&ctx.sweep_recipient_token_account()), surplus);
-    assert!(!ctx.account_exists(&ctx.snapshot_pda().0), "snapshot closed");
+    assert_eq!(
+        ctx.token_balance(&vata),
+        reward_k,
+        "vault receives reward_k"
+    );
+    assert_eq!(
+        ctx.token_balance(&ctx.sweep_recipient_token_account()),
+        surplus
+    );
+    assert!(
+        !ctx.account_exists(&ctx.snapshot_pda().0),
+        "snapshot closed"
+    );
 }
 
 // ─── Happy paths ────────────────────────────────────────────────────────────
@@ -278,7 +289,10 @@ fn emits_intent_selected_and_intent_funded_events() {
         .expect("IntentFunded event missing");
     assert_eq!(funded.intent_hash, expected_intent_hash);
     assert_eq!(funded.funder, ctx.user.pubkey());
-    assert!(funded.complete, "complete must be true — single-token, full-amount invariant");
+    assert!(
+        funded.complete,
+        "complete must be true — single-token, full-amount invariant"
+    );
 
     // Sanity: both events carry the same intent hash so an indexer keying on
     // it can correlate them.
@@ -346,7 +360,10 @@ fn idempotent_over_preexisting_vault_ata() {
 
     assert_eq!(ctx.token_balance(&ctx.user_ata()), PRE_BALANCE);
     assert_eq!(ctx.token_balance(&vata), reward_k);
-    assert_eq!(ctx.token_balance(&ctx.sweep_recipient_token_account()), surplus);
+    assert_eq!(
+        ctx.token_balance(&ctx.sweep_recipient_token_account()),
+        surplus
+    );
 
     // Positive control: the token program MUST be invoked for the two
     // `transfer_checked` CPIs (fund + surplus sweep). Asserting this first
