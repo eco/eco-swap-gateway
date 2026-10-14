@@ -6,13 +6,13 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-eco_swap_gateway = "EcoSZwpd4VnXXqfBHc4xBDzvidSRsNTPW744hs62hvWS"
+eco_swap_gateway = "EcoSZQx12vNZMCCSRgK682MrLog2RQtffohYh4oQecha"
 
 [programs.devnet]
-eco_swap_gateway = "EcoSZwpd4VnXXqfBHc4xBDzvidSRsNTPW744hs62hvWS"
+eco_swap_gateway = "EcoSZQx12vNZMCCSRgK682MrLog2RQtffohYh4oQecha"
 
 [programs.mainnet]
-eco_swap_gateway = "EcoSZwpd4VnXXqfBHc4xBDzvidSRsNTPW744hs62hvWS"
+eco_swap_gateway = "EcoSZQx12vNZMCCSRgK682MrLog2RQtffohYh4oQecha"
 
 [registry]
 url = "https://api.apr.dev"

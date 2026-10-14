@@ -8,7 +8,7 @@ Built reproducibly from the same upstream commit that dependency resolves to:
 ```sh
 git clone https://github.com/eco/eco-routes-svm.git
 cd eco-routes-svm
-git checkout aa8059ee67ac116d47693ec83926078276c083f7
+git checkout 4fba2d395f795cb046a0c55792fc54f4f6a4fda4
 solana-verify build --library-name portal \
   --base-image solanafoundation/solana-verifiable-build:4.1.1
 cp target/deploy/portal.so <this directory>/portal.so
@@ -19,11 +19,11 @@ compiles with the same platform-tools (SBF rustc 1.89.0-dev) that `anchor build`
 
 | | |
 | --- | --- |
-| source | `eco/eco-routes-svm` rev `aa8059ee67ac116d47693ec83926078276c083f7` |
-| declared portal ID | `EcoowmRRrMyYtQCuh5fCvMDWcD6B9ZDZkpgedf2bWKXi` |
-| size | 383384 bytes |
-| sha256 (file) | `22352a4d3581b49946061a85f8b762ea23aa0591b23fbf4fa4fe5c74425824c4` |
-| `solana-verify get-executable-hash` | `344a1881f7f6ea0c9b70cf26c1ead498d610f446567ecd3560e8159b634129c7` |
+| source | `eco/eco-routes-svm` rev `4fba2d395f795cb046a0c55792fc54f4f6a4fda4` (tag `deploy/v3.0.0`) |
+| declared portal ID | `EcoN71qfZMZtxwqW1Ps1kzbNKyfpCEd1izZhh58PqsDb` |
+| size | 394184 bytes |
+| sha256 (file) | `90ef761f9d064620fd93e2176c9e973f48362504c7ba2581ca65be645b1cb959` |
+| `solana-verify get-executable-hash` | `c2f85cf9d748f78c9020605ad487751d3b7de14bfc360680d85b02b975db87af` |
 
 Built **without** `--features mainnet` on purpose: `integration-tests` depends on `portal` and
 `eco-swap-gateway` without that feature, so the harness uses the non-mainnet
