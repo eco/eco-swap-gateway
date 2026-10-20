@@ -1134,7 +1134,7 @@ dependencies = [
 [[package]]
 name = "eco-svm-std"
 version = "0.1.0"
-source = "git+https://github.com/eco/eco-routes-svm.git?rev=aa8059ee67ac116d47693ec83926078276c083f7#aa8059ee67ac116d47693ec83926078276c083f7"
+source = "git+https://github.com/eco/eco-routes-svm.git?rev=4fba2d395f795cb046a0c55792fc54f4f6a4fda4#4fba2d395f795cb046a0c55792fc54f4f6a4fda4"
 dependencies = [
  "anchor-lang",
  "derive-new",
@@ -2027,7 +2027,7 @@ dependencies = [
 [[package]]
 name = "portal"
 version = "0.1.0"
-source = "git+https://github.com/eco/eco-routes-svm.git?rev=aa8059ee67ac116d47693ec83926078276c083f7#aa8059ee67ac116d47693ec83926078276c083f7"
+source = "git+https://github.com/eco/eco-routes-svm.git?rev=4fba2d395f795cb046a0c55792fc54f4f6a4fda4#4fba2d395f795cb046a0c55792fc54f4f6a4fda4"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
